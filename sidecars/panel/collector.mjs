@@ -187,19 +187,33 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     const reqDesc = extractRequirementDescriptor(row.title);
     const updatedAtMs = parseTimestampMs(row.last_modified_time);
     const isRunning = row.status === 'CASCADE_RUN_STATUS_RUNNING' || row.status === 'CASCADE_RUN_STATUS_BUSY';
+    const notFullyIdle = Boolean(row.not_fully_idle);
+    const statusGroup = row.status === 'CASCADE_RUN_STATUS_WAITING'
+      ? 'blocked'
+      : ((isRunning || notFullyIdle) ? 'in_progress' : 'idle');
+
+    const matchedProj = !projMatch.isUnassigned ? projectsById.get(projMatch.projectKey) : null;
+    const repoName = matchedProj?.folderPaths?.[0]
+      ? basename(matchedProj.folderPaths[0])
+      : (projMatch.projectName || projMatch.workspaceHint || '');
+    const rawUrisText = typeof row.workspace_uris === 'string' ? row.workspace_uris : JSON.stringify(row.workspace_uris || '');
+    const envKind = /(?:vscode-remote|ssh|https?):\/\//i.test(rawUrisText) ? 'cloud' : 'local';
 
     items.push({
       id,
       title: String(row.title || 'Untitled').replace(/\s+/g, ' ').trim() || 'Untitled',
       status: isRunning ? 'running' : 'idle',
+      statusGroup,
       isArchived,
-      notFullyIdle: Boolean(row.not_fully_idle),
+      notFullyIdle,
       updatedAtMs,
       projectKey: projMatch.projectKey,
       projectName: projMatch.projectName,
       realProjectId: projMatch.realProjectId,
       isUnassigned: projMatch.isUnassigned,
       workspaceHint: projMatch.workspaceHint || '',
+      repoName,
+      envKind,
       reqCandidate: reqDesc,
     });
   }

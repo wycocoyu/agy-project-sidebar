@@ -88,6 +88,7 @@ test('buildSidebarSnapshot resolves workspace_uris fallback, clusters >=2 themes
       conversation_id: 'c3',
       title: '1115 | 分析 | 孤立单次调研',
       status: 'CASCADE_RUN_STATUS_IDLE',
+      not_fully_idle: 1,
       project_id: 'outside-of-project',
       workspace_uris: '["file:///tmp/unrelated"]',
       last_modified_time: '2026-11-15 08:00:00+00:00',
@@ -114,9 +115,15 @@ test('buildSidebarSnapshot resolves workspace_uris fallback, clusters >=2 themes
 
   const byId = Object.fromEntries(snap.conversations.map(c => [c.id, c]));
   assert.equal(byId.c1.projectKey, 'p-ark-sub');
+  assert.equal(byId.c1.statusGroup, 'in_progress');
+  assert.equal(byId.c1.repoName, 'subpkg');
+  assert.equal(byId.c1.envKind, 'local');
   assert.equal(byId.c1.reqKey, 'THEME:通用runner实现');
+  assert.equal(byId.c2.statusGroup, 'idle');
   assert.equal(byId.c2.reqKey, 'THEME:通用runner实现');
   assert.equal(byId.c3.isUnassigned, true);
+  assert.equal(byId.c3.statusGroup, 'in_progress');
+  assert.equal(byId.c3.repoName, 'unrelated');
   assert.equal(byId.c3.reqKey, 'INBOX');
   assert.equal(byId['c4-archived'], undefined);
 });
