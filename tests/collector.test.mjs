@@ -94,6 +94,14 @@ test('buildSidebarSnapshot resolves workspace_uris fallback, clusters >=2 themes
       last_modified_time: '2026-11-15 08:00:00+00:00',
     },
     {
+      conversation_id: 'c5-waiting',
+      title: '1115 | 调试 | 等待授权確認',
+      status: 'CASCADE_RUN_STATUS_WAITING',
+      project_id: 'p-ark',
+      workspace_uris: '[]',
+      last_modified_time: '2026-11-15 08:30:00+00:00',
+    },
+    {
       conversation_id: 'c4-archived',
       title: 'MUL-100 已归档任务',
       status: 'CASCADE_RUN_STATUS_IDLE',
@@ -110,7 +118,7 @@ test('buildSidebarSnapshot resolves workspace_uris fallback, clusters >=2 themes
     showArchived: false,
   });
 
-  assert.equal(snap.stats.totalConversations, 3);
+  assert.equal(snap.stats.totalConversations, 4);
   assert.equal(snap.stats.runningCount, 1);
 
   const byId = Object.fromEntries(snap.conversations.map(c => [c.id, c]));
@@ -118,14 +126,48 @@ test('buildSidebarSnapshot resolves workspace_uris fallback, clusters >=2 themes
   assert.equal(byId.c1.statusGroup, 'in_progress');
   assert.equal(byId.c1.repoName, 'subpkg');
   assert.equal(byId.c1.envKind, 'local');
-  assert.equal(byId.c1.reqKey, 'THEME:通用runner实现');
+  assert.equal(byId.c1.reqKey, 'p-ark-sub::THEME:通用runner实现');
+  assert.equal(byId.c1.reqCount, 2);
   assert.equal(byId.c2.statusGroup, 'idle');
-  assert.equal(byId.c2.reqKey, 'THEME:通用runner实现');
+  assert.equal(byId.c2.reqKey, 'p-ark-sub::THEME:通用runner实现');
   assert.equal(byId.c3.isUnassigned, true);
-  assert.equal(byId.c3.statusGroup, 'in_progress');
+  assert.equal(byId.c3.statusGroup, 'idle');
   assert.equal(byId.c3.repoName, 'unrelated');
   assert.equal(byId.c3.reqKey, 'INBOX');
+  assert.equal(byId['c5-waiting'].statusGroup, 'blocked');
   assert.equal(byId['c4-archived'], undefined);
+});
+
+test('buildSidebarSnapshot scopes numeric #N / PR#N per project while keeping MUL/Q global', () => {
+  const rawProjects = [
+    { id: 'p-loop', name: 'LoopForge', projectResources: { resources: [{ gitFolder: { folderUri: 'file:///tmp/ws/LoopForge' } }] } },
+    { id: 'p-coco', name: 'cocoyuworkspace', projectResources: { resources: [{ gitFolder: { folderUri: 'file:///tmp/ws/cocoyuworkspace' } }] } },
+    { id: 'p-ark', name: 'ark', projectResources: { resources: [{ gitFolder: { folderUri: 'file:///tmp/ws/ark' } }] } },
+  ];
+  const rows = [
+    { conversation_id: 'l-3', title: '1115 | 设计 | #3 LoopForge支持CNB方案', status: 'CASCADE_RUN_STATUS_IDLE', project_id: 'p-loop', workspace_uris: '[]', last_modified_time: '2026-11-15 10:00:00+00:00' },
+    { conversation_id: 'c-3', title: '1115 | 功能 | #3#4 Claude与CLI1.5适配', status: 'CASCADE_RUN_STATUS_IDLE', project_id: 'p-coco', workspace_uris: '[]', last_modified_time: '2026-11-15 09:00:00+00:00' },
+    { conversation_id: 'l-pr12', title: '1115 | 修复 | PR#12 fix ci', status: 'CASCADE_RUN_STATUS_IDLE', project_id: 'p-loop', workspace_uris: '[]', last_modified_time: '2026-11-15 08:30:00+00:00' },
+    { conversation_id: 'c-pr12', title: '1115 | 文档 | PR#12 docs sync', status: 'CASCADE_RUN_STATUS_IDLE', project_id: 'p-coco', workspace_uris: '[]', last_modified_time: '2026-11-15 08:00:00+00:00' },
+    { conversation_id: 'm-1', title: '1115 | 设计 | MUL-797 通用Runner实现', status: 'CASCADE_RUN_STATUS_RUNNING', project_id: 'p-coco', workspace_uris: '[]', last_modified_time: '2026-11-15 07:30:00+00:00' },
+    { conversation_id: 'm-2', title: '1115 | 调试 | MUL-797 调度验证', status: 'CASCADE_RUN_STATUS_IDLE', project_id: 'p-ark', workspace_uris: '[]', last_modified_time: '2026-11-15 07:00:00+00:00' },
+  ];
+
+  const snap = buildSidebarSnapshot({ rawProjects, rows });
+  const byId = Object.fromEntries(snap.conversations.map(c => [c.id, c]));
+
+  assert.equal(byId['l-3'].reqKey, 'p-loop::ISSUE:#3');
+  assert.equal(byId['l-3'].reqCount, 1);
+  assert.equal(byId['l-3'].reqLabel, '#3 LoopForge支持CNB方案');
+
+  assert.equal(byId['c-3'].reqKey, 'p-coco::ISSUE:#3');
+  assert.equal(byId['c-3'].reqCount, 1);
+  assert.match(byId['c-3'].reqLabel, /#3/);
+
+  assert.notEqual(byId['l-pr12'].reqKey, byId['c-pr12'].reqKey);
+  assert.equal(byId['m-1'].reqKey, 'ISSUE:MUL-797');
+  assert.equal(byId['m-2'].reqKey, 'ISSUE:MUL-797');
+  assert.equal(byId['m-1'].reqCount, 2);
 });
 
 test('SidebarCollector reads SQLite conversation_summaries and excludes killed/nested rows', () => {

@@ -10,6 +10,7 @@ import { platformPaths } from '../../compat/platform.mjs';
 const execFileAsync = promisify(execFile);
 
 const TECH_ID_RE = /^(?:GPT|UTF|SHA|ISO|HTTP|HTTPS|CVE|NODE|PR|V\d+)-\d+$/i;
+const SHORT_REPO_ISSUE_RE = /^(?:#\d+|PR#\d+)$/i;
 const SESSION_NAME_RE = /^(\d{4})\s*\|\s*([^|]+?)\s*\|\s*(.+)$/;
 const PREFIX_ISSUE_RE = /^(#[1-9]\d*|[Qq]\d+|PR\s*#?\d+|[A-Za-z][A-Za-z0-9]{1,9}-\d+)\b[\s|:：\-]*(.*)$/;
 const EMBEDDED_ISSUE_RE = /(?:^|[\s|(\[【])(#[1-9]\d*|[A-Z]{2,10}-\d+|[Qq]\d{2,})\b/;
@@ -136,7 +137,13 @@ export function extractRequirementDescriptor(title) {
       if (!TECH_ID_RE.test(normalizedToken)) {
         const tail = prefixMatch[2].trim();
         const label = tail ? `${normalizedToken} ${tail}` : normalizedToken;
-        return { kind: 'issue', key: `ISSUE:${normalizedToken}`, shortId: normalizedToken, label };
+        return {
+          kind: 'issue',
+          key: `ISSUE:${normalizedToken}`,
+          shortId: normalizedToken,
+          label,
+          scopeByProject: SHORT_REPO_ISSUE_RE.test(normalizedToken),
+        };
       }
     }
   }
@@ -147,7 +154,13 @@ export function extractRequirementDescriptor(title) {
     if (embMatch) {
       const token = embMatch[1].startsWith('#') ? embMatch[1] : embMatch[1].toUpperCase();
       if (!TECH_ID_RE.test(token)) {
-        return { kind: 'issue', key: `ISSUE:${token}`, shortId: token, label: `${token} · ${parsed.subject || text}` };
+        return {
+          kind: 'issue',
+          key: `ISSUE:${token}`,
+          shortId: token,
+          label: `${token} · ${parsed.subject || text}`,
+          scopeByProject: SHORT_REPO_ISSUE_RE.test(token),
+        };
       }
     }
   }
@@ -158,10 +171,11 @@ export function extractRequirementDescriptor(title) {
       key: `THEME:${parsed.subject.toLowerCase()}`,
       shortId: '',
       label: parsed.subject,
+      scopeByProject: true,
     };
   }
 
-  return { kind: 'inbox', key: 'INBOX', shortId: '', label: '' };
+  return { kind: 'inbox', key: 'INBOX', shortId: '', label: '', scopeByProject: false };
 }
 
 export function parseTimestampMs(value) {
@@ -190,7 +204,7 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     const notFullyIdle = Boolean(row.not_fully_idle);
     const statusGroup = row.status === 'CASCADE_RUN_STATUS_WAITING'
       ? 'blocked'
-      : ((isRunning || notFullyIdle) ? 'in_progress' : 'idle');
+      : (isRunning ? 'in_progress' : 'idle');
 
     const matchedProj = !projMatch.isUnassigned ? projectsById.get(projMatch.projectKey) : null;
     const repoName = matchedProj?.folderPaths?.[0]
@@ -218,22 +232,23 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     });
   }
 
-  // Count how many conversations in each project share a theme-candidate key
+  // Count how many conversations in each scope share a theme-candidate or explicit issue key
   const themeCounts = new Map();
+  const issueCounts = new Map();
+  const issueLabels = new Map();
   for (const item of items) {
     if (item.reqCandidate.kind === 'theme-candidate') {
       const scopeKey = `${item.projectKey}::${item.reqCandidate.key}`;
       themeCounts.set(scopeKey, (themeCounts.get(scopeKey) || 0) + 1);
-    }
-  }
-
-  // Track best label for explicit ISSUE keys
-  const issueLabels = new Map();
-  for (const item of items) {
-    if (item.reqCandidate.kind === 'issue') {
-      const existing = issueLabels.get(item.reqCandidate.key);
+    } else if (item.reqCandidate.kind === 'issue') {
+      const effectiveKey = item.reqCandidate.scopeByProject
+        ? `${item.projectKey}::${item.reqCandidate.key}`
+        : item.reqCandidate.key;
+      item.effectiveIssueKey = effectiveKey;
+      issueCounts.set(effectiveKey, (issueCounts.get(effectiveKey) || 0) + 1);
+      const existing = issueLabels.get(effectiveKey);
       if (!existing || item.reqCandidate.label.length > existing.length) {
-        issueLabels.set(item.reqCandidate.key, item.reqCandidate.label);
+        issueLabels.set(effectiveKey, item.reqCandidate.label);
       }
     }
   }
@@ -255,16 +270,20 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     let reqKey = 'INBOX';
     let reqLabel = '';
     let reqKind = 'inbox';
+    let reqCount = 1;
     if (item.reqCandidate.kind === 'issue') {
-      reqKey = item.reqCandidate.key;
+      reqKey = item.effectiveIssueKey;
       reqLabel = issueLabels.get(reqKey) || item.reqCandidate.label;
       reqKind = 'issue';
+      reqCount = issueCounts.get(reqKey) || 1;
     } else if (item.reqCandidate.kind === 'theme-candidate') {
-      const count = themeCounts.get(`${item.projectKey}::${item.reqCandidate.key}`) || 0;
+      const scopeKey = `${item.projectKey}::${item.reqCandidate.key}`;
+      const count = themeCounts.get(scopeKey) || 0;
       if (count >= 2) {
-        reqKey = item.reqCandidate.key;
+        reqKey = scopeKey;
         reqLabel = item.reqCandidate.label;
         reqKind = 'theme';
+        reqCount = count;
       }
     }
 
@@ -284,8 +303,8 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     if (item.status === 'running') pSum.running += 1;
     if (item.updatedAtMs > pSum.latestMs) pSum.latestMs = item.updatedAtMs;
 
-    const { reqCandidate, ...rest } = item;
-    return { ...rest, reqKey, reqLabel, reqKind };
+    const { reqCandidate, effectiveIssueKey, ...rest } = item;
+    return { ...rest, reqKey, reqLabel, reqKind, reqCount };
   });
 
   conversations.sort((a, b) => {
