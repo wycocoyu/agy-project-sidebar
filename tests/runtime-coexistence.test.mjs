@@ -9,15 +9,19 @@ import { DEFAULT_PREFERENCES, PreferencesStore } from '../compat/preferences.mjs
 
 const require = createRequire(import.meta.url);
 
-test('renderer source and validTarget strictly isolate namespaces from antigravity-pulse', () => {
+test('renderer source and validTarget strictly isolate namespaces and use native requirement filter UI', () => {
   const i18n = readFileSync(new URL('../compat/i18n.cjs', import.meta.url), 'utf8');
   const widget = readFileSync(new URL('../compat/sidebar-widget.cjs', import.meta.url), 'utf8');
   const src = makeRendererSource(i18n, widget, 'owner-1', 1000);
 
   assert.equal(src.includes('__agPulse'), false);
   assert.equal(src.includes('ag-pulse-status-bar'), false);
+  assert.equal(src.includes('agy-ps-drawer'), false);
+  assert.equal(src.includes('agy-ps-restore-pill'), false);
   assert.equal(src.includes('__agyProjectSidebarCallV1'), true);
   assert.equal(src.includes('agy-project-sidebar-host'), true);
+  assert.equal(src.includes('agy-project-sidebar-filter-bar'), true);
+  assert.equal(src.includes('agy-req-results-panel'), true);
 
   assert.equal(validTarget({
     type: 'page',
@@ -32,8 +36,8 @@ test('renderer source and validTarget strictly isolate namespaces from antigravi
   }, 9222), false);
 
   const createI18n = require('../compat/i18n.cjs');
-  assert.equal(createI18n('zh-CN').tabTree, '项目树');
-  assert.equal(createI18n('en').tabTree, 'Project Tree');
+  assert.equal(createI18n('zh-CN').filterPrefix, '需求');
+  assert.equal(createI18n('en').filterPrefix, 'Req');
 });
 
 test('PreferencesStore validates fields and persists atomically', async () => {
@@ -42,21 +46,24 @@ test('PreferencesStore validates fields and persists atomically', async () => {
     const store = new PreferencesStore(join(dir, 'preferences.json'));
     const initial = await store.get();
     assert.deepEqual(initial, DEFAULT_PREFERENCES);
+    assert.deepEqual(DEFAULT_PREFERENCES, { language: 'zh-CN', selectedReqKey: null, showArchived: false });
 
     const updated = await store.set({
       language: 'en',
-      viewMode: 'native',
-      dimensions: ['status', 'project'],
-      collapsedIds: ['proj:a', 'proj:a', 'req:1'],
+      selectedReqKey: 'ISSUE:MUL-797',
+      showArchived: true,
     });
     assert.equal(updated.language, 'en');
-    assert.equal(updated.viewMode, 'native');
-    assert.deepEqual(updated.dimensions, ['project', 'status']);
-    assert.deepEqual(updated.collapsedIds, ['proj:a', 'req:1']);
+    assert.equal(updated.selectedReqKey, 'ISSUE:MUL-797');
+    assert.equal(updated.showArchived, true);
 
-    const invalid = await store.set({ dimensions: [], language: 'fr' });
+    const invalid = await store.set({ language: 'fr', selectedReqKey: 123, showArchived: 'yes' });
     assert.equal(invalid.language, 'en');
-    assert.deepEqual(invalid.dimensions, ['project', 'requirement']);
+    assert.equal(invalid.selectedReqKey, 'ISSUE:MUL-797');
+    assert.equal(invalid.showArchived, true);
+
+    const cleared = await store.set({ selectedReqKey: null });
+    assert.equal(cleared.selectedReqKey, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
