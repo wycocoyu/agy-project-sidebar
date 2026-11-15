@@ -7,7 +7,8 @@ const VALID_LANGUAGES = new Set(['zh-CN', 'en']);
 
 export const DEFAULT_PREFERENCES = Object.freeze({
   language: 'zh-CN',
-  selectedReqKey: null,
+  groupByRequirement: false,
+  collapsedReqKeys: [],
   showArchived: false,
 });
 
@@ -16,20 +17,27 @@ export function normalizePreferences(raw = {}, fallback = DEFAULT_PREFERENCES) {
   const language = VALID_LANGUAGES.has(raw.language)
     ? raw.language
     : (VALID_LANGUAGES.has(base.language) ? base.language : DEFAULT_PREFERENCES.language);
+  const groupByRequirement = typeof raw.groupByRequirement === 'boolean'
+    ? raw.groupByRequirement
+    : Boolean(base.groupByRequirement);
   const showArchived = typeof raw.showArchived === 'boolean'
     ? raw.showArchived
     : Boolean(base.showArchived);
 
-  let selectedReqKey = base.selectedReqKey || null;
-  if ('selectedReqKey' in raw) {
-    if (raw.selectedReqKey === null || raw.selectedReqKey === '') {
-      selectedReqKey = null;
-    } else if (typeof raw.selectedReqKey === 'string' && raw.selectedReqKey.length <= 256) {
-      selectedReqKey = raw.selectedReqKey;
+  let collapsedReqKeys = Array.isArray(base.collapsedReqKeys) ? [...base.collapsedReqKeys] : [];
+  if (Array.isArray(raw.collapsedReqKeys)) {
+    const seen = new Set();
+    collapsedReqKeys = [];
+    for (const item of raw.collapsedReqKeys) {
+      if (typeof item === 'string' && item.length > 0 && item.length <= 256 && !seen.has(item)) {
+        seen.add(item);
+        collapsedReqKeys.push(item);
+        if (collapsedReqKeys.length >= 500) break;
+      }
     }
   }
 
-  return { language, selectedReqKey, showArchived };
+  return { language, groupByRequirement, collapsedReqKeys, showArchived };
 }
 
 async function atomicWriteJson(file, payload) {

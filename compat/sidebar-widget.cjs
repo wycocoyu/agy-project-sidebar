@@ -5,332 +5,160 @@ module.exports = function mountProjectSidebarWidget() {
 
   const STYLE_ID = 'agy-project-sidebar-style';
   const HOST_ID = 'agy-project-sidebar-host';
-  const FILTER_OFFSET_CLASS = 'agy-req-filter-mounted';
+  const ACTIVE_LIST_CLASS = 'agy-groupby-req-active';
+  const MENU_OPT_ID = 'agy-group-by-option-requirement';
 
   const getI18n = lang => (typeof window.__agyProjectSidebarI18nFactory === 'function' ? window.__agyProjectSidebarI18nFactory(lang) : {});
 
   const CSS = `
-.${FILTER_OFFSET_CLASS} {
-  padding-top: 46px !important;
+[data-testid="conversation-list-sidebar"].${ACTIVE_LIST_CLASS} {
+  overflow-y: hidden !important;
+}
+[data-testid="conversation-list-sidebar"].${ACTIVE_LIST_CLASS} > div > div:not([data-sidebar-section-drop-id="pinned"]):not([data-sidebar-section-id="pinned"]):not([data-sidebar-section-drop-id="section-coordinator"]):not([data-sidebar-section-id="section-coordinator"]):not([data-sidebar-section-drop-id="main-section-header"]) {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+[data-agy-req-groupby="true"] > span.ml-auto {
+  font-size: 0 !important;
+}
+[data-agy-req-groupby="true"] > span.ml-auto::after {
+  content: attr(data-agy-req-label);
+  font-size: 13px;
+}
+[role="group"].agy-req-submenu-active [role="menuitemradio"]:not(#${MENU_OPT_ID}) > span[data-checked] {
+  display: none !important;
+}
+[role="group"].agy-req-submenu-active [role="menuitemradio"]:not(#${MENU_OPT_ID}) {
+  color: var(--secondary-foreground, inherit) !important;
+}
+#${MENU_OPT_ID}:hover,
+#${MENU_OPT_ID}[data-highlighted] {
+  background: var(--secondary, rgba(10,10,12,0.07));
+  color: var(--foreground, #000000);
+}
+#${MENU_OPT_ID}[data-checked] {
+  color: var(--foreground, #000000);
 }
 #${HOST_ID} {
   font-family: "Google Sans Flex", "Google Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.4;
   color: var(--foreground, #000000);
   pointer-events: none;
 }
 #${HOST_ID} * { box-sizing: border-box; }
-.agy-req-bar {
+.agy-req-viewport {
   position: fixed;
   pointer-events: auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
   background: var(--sidebar, #f3f3f3);
-  z-index: 15;
+  overflow-y: auto;
+  overscroll-behavior: none;
+  padding: 2px 8px 16px;
+  z-index: 12;
   user-select: none;
 }
-.agy-req-trigger {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 58%;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: 7px;
-  border: 1px solid var(--border, rgba(10,10,12,0.11));
-  background: color-mix(in srgb, var(--foreground, #000000) 3%, var(--sidebar, #f3f3f3));
-  color: var(--foreground, #000000);
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease;
+.agy-req-sec {
+  padding-top: 3px;
+  padding-bottom: 1px;
 }
-.agy-req-trigger:hover {
-  background: var(--sidebar-muted, rgba(10,10,12,0.07));
-}
-.agy-req-trigger.is-active {
-  border-color: color-mix(in srgb, var(--primary, #2f71e3) 45%, var(--border, rgba(10,10,12,0.11)));
-  background: color-mix(in srgb, var(--primary, #2f71e3) 10%, var(--sidebar, #f3f3f3));
-  color: var(--primary, #2f71e3);
-}
-.agy-req-trigger-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.agy-req-trigger-count {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--muted-foreground, #52525b);
-  font-variant-numeric: tabular-nums;
-}
-.agy-req-trigger.is-active .agy-req-trigger-count {
-  color: var(--primary, #2f71e3);
-}
-.agy-req-inline-clear {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 15px;
-  height: 15px;
-  border-radius: 4px;
-  font-size: 12px;
-  line-height: 1;
-  opacity: 0.72;
-}
-.agy-req-inline-clear:hover {
-  background: color-mix(in srgb, var(--foreground, #000000) 12%, transparent);
-  opacity: 1;
-}
-.agy-req-search-wrap {
-  position: relative;
-  flex: 1 1 auto;
-  min-width: 80px;
+.agy-req-hdr {
+  width: 100%;
   display: flex;
   align-items: center;
-}
-.agy-req-search {
-  width: 100%;
-  height: 28px;
-  border-radius: 7px;
-  border: 1px solid var(--border, rgba(10,10,12,0.11));
-  background: transparent;
-  color: var(--foreground, #000000);
-  padding: 0 22px 0 8px;
-  font-size: 12px;
-  font-family: inherit;
-  outline: none;
-  transition: border-color 120ms ease, background-color 120ms ease;
-}
-.agy-req-search::placeholder {
-  color: var(--muted-foreground, #52525b);
-  opacity: 0.85;
-}
-.agy-req-search:focus {
-  border-color: var(--primary, #2f71e3);
-  background: var(--background, #ffffff);
-}
-.agy-req-search-clear {
-  position: absolute;
-  right: 4px;
-  border: none;
-  background: transparent;
-  color: var(--muted-foreground, #52525b);
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  padding: 0;
-}
-.agy-req-search-clear:hover {
-  background: var(--sidebar-muted, rgba(10,10,12,0.07));
-  color: var(--foreground, #000000);
-}
-.agy-req-popover {
-  position: fixed;
-  pointer-events: auto;
-  background: var(--background, #ffffff);
-  color: var(--foreground, #000000);
-  border: 1px solid var(--border, rgba(10,10,12,0.14));
-  border-radius: 10px;
-  box-shadow: 0 10px 28px rgba(0,0,0,0.14);
-  z-index: 35;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  max-height: 440px;
-}
-.agy-req-pop-top {
-  padding: 8px 8px 6px;
-  border-bottom: 1px solid var(--border, rgba(10,10,12,0.1));
-}
-.agy-req-pop-search {
-  width: 100%;
-  height: 28px;
-  border-radius: 6px;
-  border: 1px solid var(--border, rgba(10,10,12,0.12));
-  background: color-mix(in srgb, var(--foreground, #000000) 3%, transparent);
-  color: var(--foreground, #000000);
-  padding: 0 8px;
-  font-size: 12px;
-  font-family: inherit;
-  outline: none;
-}
-.agy-req-pop-search:focus {
-  border-color: var(--primary, #2f71e3);
-  background: var(--background, #ffffff);
-}
-.agy-req-pop-list {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  padding: 4px;
-}
-.agy-req-pop-section {
-  padding: 5px 8px 3px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--muted-foreground, #52525b);
-  opacity: 0.78;
-}
-.agy-req-pop-divider {
-  height: 1px;
-  background: var(--border, rgba(10,10,12,0.08));
-  margin: 4px 6px;
-}
-.agy-req-pop-item {
-  width: 100%;
-  border: none;
-  background: transparent;
-  color: inherit;
-  border-radius: 7px;
-  padding: 6px 8px;
-  display: flex;
-  align-items: center;
+  justify-content: space-between;
   gap: 6px;
+  padding: 6px 8px 6px 4px;
+  border-radius: 8px;
+  border: none;
+  outline: none;
+  background: var(--sidebar, transparent);
+  color: var(--muted-foreground, #52525b);
   cursor: pointer;
   text-align: left;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
+  transition: background-color 100ms ease, color 100ms ease;
 }
-.agy-req-pop-item:hover {
-  background: var(--sidebar-muted, rgba(10,10,12,0.07));
+.agy-req-hdr:hover {
+  background: var(--muted, rgba(10,10,12,0.06));
+  color: var(--secondary-foreground, var(--foreground, #000000));
 }
-.agy-req-pop-item.is-selected {
-  background: color-mix(in srgb, var(--primary, #2f71e3) 12%, transparent);
-  color: var(--primary, #2f71e3);
-  font-weight: 600;
-}
-.agy-req-pop-item-title {
-  flex: 1 1 auto;
+.agy-req-hdr-left {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  flex: 1 1 auto;
 }
-.agy-req-pop-item-meta {
+.agy-req-hdr-icon {
+  width: 24px;
+  height: 24px;
+  margin: -4px 0;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--muted-foreground, #52525b);
-  font-variant-numeric: tabular-nums;
+  justify-content: center;
+  position: relative;
 }
-.agy-req-pop-item-proj {
-  max-width: 96px;
+.agy-req-hdr-icon .agy-icon-glyph {
+  display: inline-flex;
+  opacity: 0.85;
+}
+.agy-req-hdr-icon .agy-icon-chev {
+  display: none;
+  transition: transform 150ms ease;
+}
+.agy-req-hdr:hover .agy-icon-glyph,
+.agy-req-hdr.is-collapsed .agy-icon-glyph {
+  display: none;
+}
+.agy-req-hdr:hover .agy-icon-chev,
+.agy-req-hdr.is-collapsed .agy-icon-chev {
+  display: inline-flex;
+}
+.agy-req-hdr:not(.is-collapsed) .agy-icon-chev {
+  transform: rotate(90deg);
+}
+.agy-req-hdr-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.agy-req-pop-item-count {
-  flex-shrink: 0;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--foreground, #000000) 6%, transparent);
-  font-size: 10.5px;
-  line-height: 1.5;
-}
-.agy-req-pop-footer {
-  padding: 6px 10px;
-  border-top: 1px solid var(--border, rgba(10,10,12,0.08));
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--muted-foreground, #52525b);
-}
-.agy-req-lang-btn {
-  border: 1px solid var(--border, rgba(10,10,12,0.12));
-  background: transparent;
-  color: inherit;
-  border-radius: 5px;
-  padding: 1px 6px;
-  font-size: 11px;
-  cursor: pointer;
-}
-.agy-req-lang-btn:hover {
-  background: var(--sidebar-muted, rgba(10,10,12,0.07));
-}
-.agy-req-results {
-  position: fixed;
-  pointer-events: auto;
-  background: var(--sidebar, #f3f3f3);
-  z-index: 14;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.agy-req-results-hdr {
-  padding: 4px 10px 6px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11.5px;
-  color: var(--muted-foreground, #52525b);
-  border-bottom: 1px solid var(--border, rgba(10,10,12,0.07));
-  flex-shrink: 0;
-}
-.agy-req-results-hdr-title {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 500;
 }
-.agy-req-clear-link {
+.agy-req-hdr-count {
   flex-shrink: 0;
-  border: none;
-  background: transparent;
-  color: var(--primary, #2f71e3);
   font-size: 11.5px;
-  font-family: inherit;
-  cursor: pointer;
-  padding: 2px 5px;
-  border-radius: 5px;
-}
-.agy-req-clear-link:hover {
-  background: color-mix(in srgb, var(--primary, #2f71e3) 10%, transparent);
-}
-.agy-req-results-scroll {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  padding: 4px 8px 16px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
 }
 .agy-req-row {
   width: 100%;
   border: none;
   background: transparent;
-  color: var(--foreground, #000000);
+  color: var(--secondary-foreground, var(--foreground, #000000));
   border-radius: 8px;
-  padding: 6px 8px;
+  padding: 6px 8px 6px 30px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   cursor: pointer;
   text-align: left;
   font-family: inherit;
-  transition: background-color 100ms ease;
+  transition: background-color 100ms ease, color 100ms ease;
+  margin-bottom: 1px;
 }
 .agy-req-row:hover {
   background: var(--sidebar-muted, rgba(10,10,12,0.07));
+  color: var(--foreground, #000000);
 }
 .agy-req-row.is-active {
   background: var(--sidebar-muted, rgba(10,10,12,0.09));
+  color: var(--foreground, #000000);
 }
 .agy-req-row-top {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
   width: 100%;
 }
@@ -341,17 +169,16 @@ module.exports = function mountProjectSidebarWidget() {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-  font-weight: 400;
-  color: var(--foreground, #000000);
 }
 .agy-req-row.is-active .agy-req-row-title {
   font-weight: 500;
 }
-.agy-req-row-time {
+.agy-req-row-right {
   flex-shrink: 0;
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 11.5px;
   color: var(--muted-foreground, #52525b);
-  opacity: 0.78;
   font-variant-numeric: tabular-nums;
 }
 .agy-req-row-sub {
@@ -368,32 +195,36 @@ module.exports = function mountProjectSidebarWidget() {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.agy-req-row-tag {
-  margin-left: auto;
-  flex-shrink: 0;
-  font-size: 10.5px;
-  padding: 0 5px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--foreground, #000000) 6%, transparent);
-  color: var(--muted-foreground, #52525b);
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.agy-req-spinner {
+  display: grid;
+  grid-template-columns: repeat(2, 4px);
+  gap: 2px;
+  width: 14px;
+  height: 14px;
+  place-content: center;
+  opacity: 0.72;
 }
-.agy-req-dot {
-  width: 7px;
-  height: 7px;
+.agy-req-spinner > span {
+  width: 4px;
+  height: 4px;
   border-radius: 999px;
-  background: #10b981;
-  flex-shrink: 0;
-  box-shadow: 0 0 0 2px color-mix(in srgb, #10b981 22%, transparent);
+  background: currentColor;
 }
-.agy-req-empty {
-  padding: 28px 12px;
-  text-align: center;
-  font-size: 12px;
+.agy-req-more {
+  width: 100%;
+  border: none;
+  background: transparent;
   color: var(--muted-foreground, #52525b);
+  padding: 5px 8px 5px 30px;
+  border-radius: 8px;
+  text-align: left;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.agy-req-more:hover {
+  background: var(--sidebar-muted, rgba(10,10,12,0.07));
+  color: var(--foreground, #000000);
 }
 `;
 
@@ -438,15 +269,15 @@ module.exports = function mountProjectSidebarWidget() {
     return svg;
   }
 
-  const ICON_FILTER = 'M411.15-260v-60H548.46v60H411.15Zm-155-190v-60H703.46v60H256.16ZM140-640v-60H820v60H140Z';
+  const ICON_CHEVRON_RIGHT = 'M517.85-480l-184-184L376-706.15L602.15-480L376-253.85L333.85-296l184-184Z';
+  const ICON_CHECK = 'M382-339.38L727.54-684.92q8.92-8.92 20.88-9.12t21.27,9.12T779-663.54t-9.31,21.38l-362.38,363Q396.46-268.31 382-268.31t-25.31-10.85l-167-167q-8.92-8.92-8.81-21.19t9.42-21.58t21.38-9.31t21.38,9.31L382-339.38Z';
   const ICON_FOLDER = 'M172.31-180Q142-180 121-201t-21-51.31V-707.69Q100-738 121-759t51.31-21H391.92l80,80H787.69Q818-700 839-679t21,51.31v375.38Q860-222 839-201t-51.31,21H172.31Zm0-60H787.69q5.39,0 8.85-3.46t3.46-8.85V-627.69q0-5.39-3.46-8.85T787.69-640H447.38l-80-80H172.31q-5.39,0-8.85,3.46T160-707.69v455.38q0,5.39 3.46,8.85t8.85,3.46Z';
-  const ICON_CHEVRON = 'M480-344 240-584l56-56 184 184 184-184 56 56-240 240Z';
-  const ICON_CHECK = 'M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z';
+  const ICON_TAG = 'M856-390 570-104q-12 12-27 18t-30 6q-15 0-30-6t-27-18L103-457q-11-11-17-25.5T80-513v-287q0-33 23.5-56.5T160-880h287q16 0 31 6.5t26 17.5l352 353q12 12 17.5 27t5.5 30q0 15-5.5 29.5T856-390ZM513-160l286-286-353-354H160v286l353 354ZM260-640q25 0 42.5-17.5T320-700q0-25-17.5-42.5T260-760q-25 0-42.5 17.5T200-700q0 25 17.5 42.5T260-640Z';
 
   function formatRelativeTime(ms) {
     if (!ms) return '';
     const diff = Date.now() - ms;
-    if (diff < 60000) return '<1m';
+    if (diff < 60000) return 'now';
     if (diff < 3600000) return `${Math.floor(diff / 60000)}m`;
     if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
     if (diff < 86400000 * 7) return `${Math.floor(diff / 86400000)}d`;
@@ -465,336 +296,239 @@ module.exports = function mountProjectSidebarWidget() {
     window.history.pushState(null, '', nextPath);
   }
 
-  let currentOuterEl = null;
-  function clearOffsetClass() {
-    if (currentOuterEl) {
-      currentOuterEl.classList.remove(FILTER_OFFSET_CLASS);
-      currentOuterEl = null;
-    }
-  }
-
-  function measureSidebarRects() {
-    const list = document.querySelector('[data-testid="conversation-list-sidebar"]');
-    if (!list) {
-      clearOffsetClass();
-      return null;
-    }
-    const mid = list.parentElement;
-    const outer = mid?.parentElement;
-    if (!mid || !outer) {
-      clearOffsetClass();
-      return null;
-    }
-    const style = getComputedStyle(outer);
-    if (style.display === 'none' || style.visibility === 'hidden') {
-      clearOffsetClass();
-      return null;
-    }
-    const outerRect = outer.getBoundingClientRect();
-    if (outerRect.width < 180 || outerRect.height < 160) {
-      clearOffsetClass();
-      return null;
-    }
-    if (currentOuterEl !== outer) {
-      clearOffsetClass();
-      currentOuterEl = outer;
-    }
-    outer.classList.add(FILTER_OFFSET_CLASS);
-    const listRect = mid.getBoundingClientRect();
-    return {
-      outer: { left: outerRect.left, top: outerRect.top, width: outerRect.width, height: outerRect.height },
-      list: { left: listRect.left, top: listRect.top, width: listRect.width, height: listRect.height },
-    };
-  }
-
-  function summarizeRequirements(conversations, t) {
-    const groups = new Map();
-    for (const conv of conversations) {
-      const key = conv.reqKey || 'INBOX';
-      if (!groups.has(key)) {
-        groups.set(key, {
-          key,
-          kind: conv.reqKind || 'inbox',
-          label: conv.reqKind === 'inbox' ? t.inbox : (conv.reqLabel || key),
-          count: 0,
-          running: 0,
-          latestMs: 0,
-          projects: new Set(),
-        });
-      }
-      const g = groups.get(key);
-      g.count += 1;
-      if (conv.status === 'running') g.running += 1;
-      if ((conv.updatedAtMs || 0) > g.latestMs) g.latestMs = conv.updatedAtMs || 0;
-      if (conv.projectName && !conv.isUnassigned) g.projects.add(conv.projectName);
-    }
-
-    const reqs = [];
-    let inbox = null;
-    for (const g of groups.values()) {
-      const item = { ...g, projects: [...g.projects] };
-      if (item.kind === 'inbox') inbox = item;
-      else reqs.push(item);
-    }
-    reqs.sort((a, b) => {
-      if ((a.running > 0) !== (b.running > 0)) return b.running - a.running;
-      return b.latestMs - a.latestMs;
-    });
-    return { reqs, inbox };
+  function closeOpenOverlayMenus() {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    setTimeout(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }, 30);
   }
 
   const state = {
-    prefs: { language: 'zh-CN', selectedReqKey: null, showArchived: false },
+    prefs: { language: 'zh-CN', groupByRequirement: false, collapsedReqKeys: [], showArchived: false },
     tree: { projects: [], conversations: [], stats: { totalProjects: 0, totalConversations: 0, runningCount: 0 } },
-    rects: null,
-    search: '',
-    popoverOpen: false,
-    popoverSearch: '',
+    standaloneLimit: 20,
     scrollTop: 0,
     lastRenderSignature: '',
   };
 
   async function updatePrefs(patch) {
     state.prefs = { ...state.prefs, ...patch };
+    syncOfficialMenus();
     render();
     try {
       const saved = await window.__agyProjectSidebarHost?.setPreferences?.(patch);
       if (saved && typeof saved === 'object' && !saved.offline) {
         state.prefs = { ...state.prefs, ...saved };
+        syncOfficialMenus();
         render();
       }
     } catch { /* ignore optimistic fallback */ }
   }
 
-  function renderPopover(anchorRect, t, conversations) {
-    const { reqs, inbox } = summarizeRequirements(conversations, t);
-    const pop = el('div', 'agy-req-popover');
-    pop.id = 'agy-req-popover';
-    const maxWidth = Math.min(360, Math.max(260, anchorRect.width));
-    pop.style.left = `${anchorRect.left}px`;
-    pop.style.top = `${anchorRect.top + anchorRect.height + 4}px`;
-    pop.style.width = `${maxWidth}px`;
-
-    const top = el('div', 'agy-req-pop-top');
-    const popSearch = el('input', 'agy-req-pop-search');
-    popSearch.id = 'agy-req-pop-search';
-    popSearch.type = 'text';
-    popSearch.placeholder = t.dropdownSearchPlaceholder;
-    popSearch.value = state.popoverSearch;
-    popSearch.addEventListener('input', e => {
-      state.popoverSearch = e.target.value;
-      fillPopoverList(listEl);
-    });
-    popSearch.addEventListener('keydown', e => {
-      if (e.key === 'Escape') {
-        state.popoverOpen = false;
-        render();
-      }
-    });
-    top.appendChild(popSearch);
-    pop.appendChild(top);
-
-    const listEl = el('div', 'agy-req-pop-list');
-    function fillPopoverList(target) {
-      target.textContent = '';
-      const q = state.popoverSearch.trim().toLowerCase();
-
-      if (!q) {
-        const allBtn = el('button', `agy-req-pop-item${!state.prefs.selectedReqKey ? ' is-selected' : ''}`);
-        allBtn.type = 'button';
-        allBtn.dataset.reqKey = '';
-        if (!state.prefs.selectedReqKey) allBtn.appendChild(svgIcon(ICON_CHECK, 13));
-        allBtn.appendChild(el('span', 'agy-req-pop-item-title', t.allNative));
-        allBtn.appendChild(el('span', 'agy-req-pop-item-count', String(conversations.length)));
-        allBtn.addEventListener('click', () => {
-          state.popoverOpen = false;
-          state.popoverSearch = '';
-          void updatePrefs({ selectedReqKey: null });
-        });
-        target.appendChild(allBtn);
-        target.appendChild(el('div', 'agy-req-pop-divider'));
-        target.appendChild(el('div', 'agy-req-pop-section', `${t.requirementsGroup} (${reqs.length})`));
-      }
-
-      const filteredReqs = q
-        ? reqs.filter(r => r.label.toLowerCase().includes(q) || r.key.toLowerCase().includes(q) || r.projects.some(p => p.toLowerCase().includes(q)))
-        : reqs;
-
-      for (const reqItem of filteredReqs) {
-        const btn = el('button', `agy-req-pop-item${state.prefs.selectedReqKey === reqItem.key ? ' is-selected' : ''}`);
-        btn.type = 'button';
-        btn.dataset.reqKey = reqItem.key;
-        if (reqItem.running > 0) btn.appendChild(el('span', 'agy-req-dot'));
-        else if (state.prefs.selectedReqKey === reqItem.key) btn.appendChild(svgIcon(ICON_CHECK, 13));
-        btn.appendChild(el('span', 'agy-req-pop-item-title', reqItem.label));
-        const meta = el('span', 'agy-req-pop-item-meta');
-        if (reqItem.projects[0]) meta.appendChild(el('span', 'agy-req-pop-item-proj', reqItem.projects[0]));
-        meta.appendChild(el('span', 'agy-req-pop-item-count', String(reqItem.count)));
-        btn.appendChild(meta);
-        btn.addEventListener('click', () => {
-          state.popoverOpen = false;
-          state.popoverSearch = '';
-          state.scrollTop = 0;
-          void updatePrefs({ selectedReqKey: reqItem.key });
-        });
-        target.appendChild(btn);
-      }
-
-      if (inbox && (!q || t.inbox.toLowerCase().includes(q) || 'inbox'.includes(q))) {
-        if (filteredReqs.length) target.appendChild(el('div', 'agy-req-pop-divider'));
-        const inboxBtn = el('button', `agy-req-pop-item${state.prefs.selectedReqKey === 'INBOX' ? ' is-selected' : ''}`);
-        inboxBtn.type = 'button';
-        inboxBtn.dataset.reqKey = 'INBOX';
-        if (inbox.running > 0) inboxBtn.appendChild(el('span', 'agy-req-dot'));
-        else if (state.prefs.selectedReqKey === 'INBOX') inboxBtn.appendChild(svgIcon(ICON_CHECK, 13));
-        inboxBtn.appendChild(el('span', 'agy-req-pop-item-title', t.inbox));
-        inboxBtn.appendChild(el('span', 'agy-req-pop-item-count', String(inbox.count)));
-        inboxBtn.addEventListener('click', () => {
-          state.popoverOpen = false;
-          state.popoverSearch = '';
-          state.scrollTop = 0;
-          void updatePrefs({ selectedReqKey: 'INBOX' });
-        });
-        target.appendChild(inboxBtn);
-      }
-
-      if (!filteredReqs.length && (!inbox || (q && !t.inbox.toLowerCase().includes(q)))) {
-        target.appendChild(el('div', 'agy-req-empty', t.noReqFound));
-      }
-    }
-
-    fillPopoverList(listEl);
-    pop.appendChild(listEl);
-
-    const footer = el('div', 'agy-req-pop-footer');
-    footer.appendChild(el('span', '', `${reqs.length} · ${conversations.length}`));
-    const langBtn = el('button', 'agy-req-lang-btn', state.prefs.language === 'en' ? '中文' : 'EN');
-    langBtn.type = 'button';
-    langBtn.addEventListener('click', () => {
-      void updatePrefs({ language: state.prefs.language === 'en' ? 'zh-CN' : 'en' });
-    });
-    footer.appendChild(langBtn);
-    pop.appendChild(footer);
-
-    return pop;
+  function toggleCollapseReq(key) {
+    const set = new Set(state.prefs.collapsedReqKeys || []);
+    if (set.has(key)) set.delete(key);
+    else set.add(key);
+    void updatePrefs({ collapsedReqKeys: [...set] });
   }
 
-  function renderResultsPanel(listRect, t, conversations, activeReq) {
-    const q = state.search.trim().toLowerCase();
-    const matches = conversations.filter(conv => {
-      if (state.prefs.selectedReqKey && conv.reqKey !== state.prefs.selectedReqKey) return false;
-      if (!q) return true;
-      return (
-        conv.title.toLowerCase().includes(q) ||
-        conv.reqLabel.toLowerCase().includes(q) ||
-        conv.reqKey.toLowerCase().includes(q) ||
-        (conv.projectName || '').toLowerCase().includes(q)
-      );
-    });
+  let activeListEl = null;
+  function clearListClass() {
+    if (activeListEl) {
+      activeListEl.classList.remove(ACTIVE_LIST_CLASS);
+      activeListEl = null;
+    }
+  }
 
-    const panel = el('div', 'agy-req-results');
-    panel.id = 'agy-req-results-panel';
-    panel.style.left = `${listRect.left}px`;
-    panel.style.top = `${listRect.top}px`;
-    panel.style.width = `${listRect.width}px`;
-    panel.style.height = `${listRect.height}px`;
+  function syncOfficialMenus() {
+    const t = getI18n(state.prefs.language);
+    const isReq = Boolean(state.prefs.groupByRequirement);
 
-    const hdr = el('div', 'agy-req-results-hdr');
-    const titleLabel = activeReq
-      ? `${t.filterPrefix} · ${activeReq.label} (${matches.length})`
-      : `${t.filterPrefix} · "${state.search.trim()}" (${matches.length})`;
-    hdr.appendChild(el('span', 'agy-req-results-hdr-title', titleLabel));
-
-    const clearBtn = el('button', 'agy-req-clear-link', `${t.clearFilter} ×`);
-    clearBtn.id = 'agy-req-panel-clear';
-    clearBtn.type = 'button';
-    clearBtn.addEventListener('click', () => {
-      state.search = '';
-      state.scrollTop = 0;
-      void updatePrefs({ selectedReqKey: null });
-    });
-    hdr.appendChild(clearBtn);
-    panel.appendChild(hdr);
-
-    const scroll = el('div', 'agy-req-results-scroll');
-    if (!matches.length) {
-      scroll.appendChild(el('div', 'agy-req-empty', t.empty));
-    } else {
-      const activeChatId = currentChatId();
-      for (const conv of matches) {
-        const row = el('button', `agy-req-row${conv.id === activeChatId ? ' is-active' : ''}`);
-        row.type = 'button';
-        row.dataset.conversationId = conv.id;
-
-        const top = el('div', 'agy-req-row-top');
-        if (conv.status === 'running') top.appendChild(el('span', 'agy-req-dot'));
-        top.appendChild(el('span', 'agy-req-row-title', conv.title));
-        const timeText = conv.status === 'running' ? t.running : formatRelativeTime(conv.updatedAtMs);
-        if (timeText) top.appendChild(el('span', 'agy-req-row-time', timeText));
-        row.appendChild(top);
-
-        const sub = el('div', 'agy-req-row-sub');
-        sub.appendChild(svgIcon(ICON_FOLDER, 13));
-        const projText = conv.isUnassigned ? (conv.workspaceHint ? conv.workspaceHint.split('/').pop() : 'Outside of Project') : conv.projectName;
-        sub.appendChild(el('span', 'agy-req-row-proj', projText));
-        if (!state.prefs.selectedReqKey && conv.reqKind !== 'inbox' && conv.reqLabel) {
-          sub.appendChild(el('span', 'agy-req-row-tag', conv.reqLabel));
-        }
-        row.appendChild(sub);
-
-        row.addEventListener('click', () => navigateToConversation(conv.id));
-        scroll.appendChild(row);
+    // 1. Sync "Group By   <Current>" label inside Display Options root menu
+    const triggers = document.querySelectorAll('[data-testid="group-by-submenu-trigger"]');
+    for (const trig of triggers) {
+      const wrap = trig.parentElement;
+      const valSpan = wrap?.querySelector('span.ml-auto');
+      if (!wrap || !valSpan) continue;
+      if (isReq) {
+        wrap.setAttribute('data-agy-req-groupby', 'true');
+        valSpan.setAttribute('data-agy-req-label', t.menuOption);
+      } else {
+        wrap.removeAttribute('data-agy-req-groupby');
+        valSpan.removeAttribute('data-agy-req-label');
       }
     }
 
-    scroll.addEventListener('scroll', () => {
-      state.scrollTop = scroll.scrollTop;
+    // 2. Sync "Requirement" radio option inside Group By submenu
+    const projOptLabel = document.querySelector('[data-testid="group-by-option-project"]');
+    const projItem = projOptLabel?.closest('[role="menuitemradio"]');
+    const groupBox = projItem?.parentElement;
+    if (!groupBox) return;
+
+    groupBox.classList.toggle('agy-req-submenu-active', isReq);
+
+    let reqItem = groupBox.querySelector(`#${MENU_OPT_ID}`);
+    if (!reqItem) {
+      reqItem = el(
+        'div',
+        'agy-overlay-item group w-full pr-2 pl-2 text-left text-compact cursor-pointer outline-none no-focus-ring transition-colors select-none flex items-center rounded-md py-1 gap-1.5 text-secondary-foreground justify-between',
+      );
+      reqItem.id = MENU_OPT_ID;
+      reqItem.setAttribute('role', 'menuitemradio');
+      reqItem.setAttribute('tabindex', '-1');
+
+      const labelOuter = el('span', 'min-w-0 truncate');
+      const labelInner = el('span', '', t.menuOption);
+      labelInner.setAttribute('data-testid', 'group-by-option-requirement');
+      labelOuter.appendChild(labelInner);
+      reqItem.appendChild(labelOuter);
+
+      reqItem.addEventListener('pointerenter', () => {
+        for (const sib of groupBox.querySelectorAll('[role="menuitemradio"][data-highlighted]')) {
+          if (sib !== reqItem) sib.removeAttribute('data-highlighted');
+        }
+        reqItem.setAttribute('data-highlighted', '');
+      });
+      reqItem.addEventListener('pointerleave', () => {
+        reqItem.removeAttribute('data-highlighted');
+      });
+      reqItem.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        state.scrollTop = 0;
+        void updatePrefs({ groupByRequirement: true });
+        closeOpenOverlayMenus();
+      });
+
+      if (projItem.nextSibling) groupBox.insertBefore(reqItem, projItem.nextSibling);
+      else groupBox.appendChild(reqItem);
+    }
+
+    reqItem.setAttribute('aria-checked', isReq ? 'true' : 'false');
+    if (isReq) {
+      reqItem.setAttribute('data-checked', '');
+      reqItem.removeAttribute('data-unchecked');
+      if (!reqItem.querySelector('[data-checked]')) {
+        const chk = el('span');
+        chk.setAttribute('data-checked', '');
+        chk.setAttribute('aria-hidden', 'true');
+        chk.appendChild(svgIcon(ICON_CHECK, 14));
+        reqItem.appendChild(chk);
+      }
+    } else {
+      reqItem.removeAttribute('data-checked');
+      reqItem.setAttribute('data-unchecked', '');
+      reqItem.querySelector('span[data-checked]')?.remove();
+    }
+  }
+
+  function measureViewportRect() {
+    const list = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    if (!list || !state.prefs.groupByRequirement) {
+      clearListClass();
+      return null;
+    }
+    const style = getComputedStyle(list);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      clearListClass();
+      return null;
+    }
+    const listRect = list.getBoundingClientRect();
+    if (listRect.width < 180 || listRect.height < 160) {
+      clearListClass();
+      return null;
+    }
+
+    if (list.scrollTop > 0) list.scrollTop = 0;
+    if (activeListEl !== list) {
+      clearListClass();
+      activeListEl = list;
+    }
+    list.classList.add(ACTIVE_LIST_CLASS);
+
+    const mainHdr = list.querySelector('[data-sidebar-section-drop-id="main-section-header"]');
+    const secHdr = mainHdr?.querySelector('[data-testid="section-header"][data-title="Conversations"]');
+    if (secHdr?.getAttribute('data-collapsed') === 'true') {
+      return { collapsed: true };
+    }
+
+    let top = listRect.top + 28;
+    if (mainHdr) {
+      const hr = mainHdr.getBoundingClientRect();
+      if (hr.bottom >= listRect.top && hr.bottom < listRect.bottom - 100) {
+        top = Math.round(hr.bottom + 2);
+      }
+    }
+    const height = Math.max(80, Math.round(listRect.bottom - top));
+    return {
+      collapsed: false,
+      left: Math.round(listRect.left),
+      top,
+      width: Math.round(listRect.width),
+      height,
+    };
+  }
+
+  function buildRequirementSections(conversations, pinnedIds, t) {
+    const groups = new Map();
+    for (const conv of conversations) {
+      const key = conv.reqKey || 'INBOX';
+      if (key === 'INBOX' && pinnedIds.has(conv.id)) continue;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          kind: conv.reqKind || 'inbox',
+          label: conv.reqKind === 'inbox' ? t.standalone : (conv.reqLabel || key),
+          items: [],
+          running: 0,
+          latestMs: 0,
+        });
+      }
+      const g = groups.get(key);
+      g.items.push(conv);
+      if (conv.status === 'running') g.running += 1;
+      if ((conv.updatedAtMs || 0) > g.latestMs) g.latestMs = conv.updatedAtMs || 0;
+    }
+
+    const reqs = [];
+    let standalone = null;
+    for (const g of groups.values()) {
+      if (!g.items.length) continue;
+      if (g.kind === 'inbox') standalone = g;
+      else reqs.push(g);
+    }
+    reqs.sort((a, b) => {
+      if ((a.running > 0) !== (b.running > 0)) return b.running - a.running;
+      return b.latestMs - a.latestMs;
     });
-    panel.appendChild(scroll);
-    requestAnimationFrame(() => {
-      if (state.scrollTop && scroll.isConnected) scroll.scrollTop = state.scrollTop;
-    });
-    return panel;
+    if (standalone) reqs.push(standalone);
+    return reqs;
   }
 
   function render() {
     ensureStyle();
     const host = ensureHost();
-    const rects = measureSidebarRects();
-    state.rects = rects;
+    const vp = measureViewportRect();
 
-    if (!rects) {
-      state.popoverOpen = false;
-      state.lastRenderSignature = 'hidden';
+    if (!vp || vp.collapsed) {
+      state.lastRenderSignature = vp?.collapsed ? 'collapsed' : 'inactive';
       host.textContent = '';
       return;
     }
 
-    const activeEl = document.activeElement;
-    const activeId = activeEl && host.contains(activeEl) ? activeEl.id : null;
-    const cursorPos = activeEl && typeof activeEl.selectionStart === 'number' ? activeEl.selectionStart : null;
-
+    const pinnedIds = new Set(
+      [...document.querySelectorAll('[data-testid="conversation-row-sidebar"][data-pinned="true"]')]
+        .map(n => n.getAttribute('data-cascade-id'))
+        .filter(Boolean),
+    );
     const t = getI18n(state.prefs.language);
     const conversations = state.tree.conversations || [];
-    const { reqs, inbox } = summarizeRequirements(conversations, t);
-    const activeReq = state.prefs.selectedReqKey
-      ? (state.prefs.selectedReqKey === 'INBOX' ? inbox : reqs.find(r => r.key === state.prefs.selectedReqKey)) || { key: state.prefs.selectedReqKey, label: state.prefs.selectedReqKey.replace(/^ISSUE:/, ''), count: 0 }
-      : null;
-
-    const barRect = {
-      left: Math.round(rects.outer.left + 8),
-      top: Math.round(rects.outer.top + 8),
-      width: Math.max(160, Math.round(rects.outer.width - 16)),
-      height: 30,
-    };
-
     const sig = JSON.stringify({
-      barRect,
-      listRect: { l: Math.round(rects.list.left), t: Math.round(rects.list.top), w: Math.round(rects.list.width), h: Math.round(rects.list.height) },
+      vp,
       lang: state.prefs.language,
-      req: state.prefs.selectedReqKey,
-      q: state.search,
-      pop: state.popoverOpen,
+      collapsed: state.prefs.collapsedReqKeys,
+      limit: state.standaloneLimit,
+      pinned: [...pinnedIds],
       chat: currentChatId(),
       running: state.tree.stats?.runningCount || 0,
       count: conversations.length,
@@ -805,97 +539,107 @@ module.exports = function mountProjectSidebarWidget() {
 
     host.textContent = '';
 
-    const bar = el('div', 'agy-req-bar');
-    bar.id = 'agy-project-sidebar-filter-bar';
-    bar.style.left = `${barRect.left}px`;
-    bar.style.top = `${barRect.top}px`;
-    bar.style.width = `${barRect.width}px`;
-    bar.style.height = `${barRect.height}px`;
+    const viewport = el('div', 'agy-req-viewport');
+    viewport.id = 'agy-req-groups-viewport';
+    viewport.style.left = `${vp.left}px`;
+    viewport.style.top = `${vp.top}px`;
+    viewport.style.width = `${vp.width}px`;
+    viewport.style.height = `${vp.height}px`;
 
-    const trigger = el('button', `agy-req-trigger${activeReq ? ' is-active' : ''}`);
-    trigger.id = 'agy-req-filter-trigger';
-    trigger.type = 'button';
-    trigger.appendChild(svgIcon(ICON_FILTER, 14));
-    trigger.appendChild(el('span', 'agy-req-trigger-label', activeReq ? activeReq.label : `${t.filterPrefix}: ${t.allLabel}`));
-    if (activeReq) {
-      trigger.appendChild(el('span', 'agy-req-trigger-count', `(${activeReq.count})`));
-      const clearX = el('span', 'agy-req-inline-clear', '×');
-      clearX.id = 'agy-req-clear-btn';
-      clearX.title = t.clearFilter;
-      clearX.addEventListener('click', e => {
-        e.stopPropagation();
-        state.popoverOpen = false;
-        state.scrollTop = 0;
-        void updatePrefs({ selectedReqKey: null });
-      });
-      trigger.appendChild(clearX);
-    } else {
-      trigger.appendChild(svgIcon(ICON_CHEVRON, 14));
-    }
-    trigger.addEventListener('click', e => {
-      e.stopPropagation();
-      state.popoverOpen = !state.popoverOpen;
-      state.popoverSearch = '';
-      render();
-      if (state.popoverOpen) {
-        requestAnimationFrame(() => document.getElementById('agy-req-pop-search')?.focus());
-      }
-    });
-    bar.appendChild(trigger);
+    const sections = buildRequirementSections(conversations, pinnedIds, t);
+    const collapsedSet = new Set(state.prefs.collapsedReqKeys || []);
+    const activeChatId = currentChatId();
 
-    const searchWrap = el('div', 'agy-req-search-wrap');
-    const searchInput = el('input', 'agy-req-search');
-    searchInput.id = 'agy-req-search-input';
-    searchInput.type = 'text';
-    searchInput.placeholder = t.searchPlaceholder;
-    searchInput.value = state.search;
-    searchInput.addEventListener('input', e => {
-      state.search = e.target.value;
-      state.scrollTop = 0;
-      render();
-    });
-    searchInput.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && state.search) {
-        state.search = '';
-        state.scrollTop = 0;
-        render();
-      }
-    });
-    searchWrap.appendChild(searchInput);
+    for (const sec of sections) {
+      const isCollapsed = collapsedSet.has(sec.key);
+      const secEl = el('div', 'agy-req-sec');
+      secEl.dataset.reqSection = sec.key;
 
-    if (state.search) {
-      const clearSearchBtn = el('button', 'agy-req-search-clear', '×');
-      clearSearchBtn.type = 'button';
-      clearSearchBtn.title = t.clearFilter;
-      clearSearchBtn.addEventListener('click', () => {
-        state.search = '';
-        state.scrollTop = 0;
-        render();
-        document.getElementById('agy-req-search-input')?.focus();
-      });
-      searchWrap.appendChild(clearSearchBtn);
-    }
-    bar.appendChild(searchWrap);
-    host.appendChild(bar);
+      const hdr = el('button', `agy-req-hdr${isCollapsed ? ' is-collapsed' : ''}`);
+      hdr.type = 'button';
+      hdr.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      hdr.addEventListener('click', () => toggleCollapseReq(sec.key));
 
-    if (state.prefs.selectedReqKey || state.search.trim()) {
-      host.appendChild(renderResultsPanel(rects.list, t, conversations, activeReq));
-    }
+      const hdrLeft = el('div', 'agy-req-hdr-left');
+      const iconBox = el('div', 'agy-req-hdr-icon');
+      const glyph = el('span', 'agy-icon-glyph');
+      glyph.appendChild(svgIcon(sec.kind === 'inbox' ? ICON_FOLDER : ICON_TAG, 15));
+      const chev = el('span', 'agy-icon-chev');
+      chev.appendChild(svgIcon(ICON_CHEVRON_RIGHT, 14));
+      iconBox.append(glyph, chev);
+      hdrLeft.appendChild(iconBox);
+      hdrLeft.appendChild(el('span', 'agy-req-hdr-label', sec.label));
+      hdr.appendChild(hdrLeft);
+      hdr.appendChild(el('span', 'agy-req-hdr-count', String(sec.items.length)));
+      secEl.appendChild(hdr);
 
-    if (state.popoverOpen) {
-      host.appendChild(renderPopover(barRect, t, conversations));
-    }
+      if (!isCollapsed) {
+        const visibleItems = sec.kind === 'inbox' ? sec.items.slice(0, state.standaloneLimit) : sec.items;
+        for (const conv of visibleItems) {
+          const row = el('button', `agy-req-row${conv.id === activeChatId ? ' is-active' : ''}`);
+          row.type = 'button';
+          row.dataset.conversationId = conv.id;
 
-    if (activeId) {
-      const restored = document.getElementById(activeId);
-      if (restored) {
-        restored.focus();
-        if (cursorPos != null && typeof restored.setSelectionRange === 'function') {
-          restored.setSelectionRange(cursorPos, cursorPos);
+          const top = el('div', 'agy-req-row-top');
+          top.appendChild(el('span', 'agy-req-row-title', conv.title));
+          const right = el('span', 'agy-req-row-right');
+          if (conv.status === 'running') {
+            const spin = el('span', 'agy-req-spinner');
+            spin.append(el('span'), el('span'), el('span'), el('span'));
+            right.appendChild(spin);
+          } else {
+            right.textContent = formatRelativeTime(conv.updatedAtMs);
+          }
+          top.appendChild(right);
+          row.appendChild(top);
+
+          const sub = el('div', 'agy-req-row-sub');
+          sub.appendChild(svgIcon(ICON_FOLDER, 13));
+          const projText = conv.isUnassigned
+            ? (conv.workspaceHint ? conv.workspaceHint.split('/').pop() : 'Outside of Project')
+            : conv.projectName;
+          sub.appendChild(el('span', 'agy-req-row-proj', projText));
+          row.appendChild(sub);
+
+          row.addEventListener('click', () => navigateToConversation(conv.id));
+          secEl.appendChild(row);
+        }
+
+        if (sec.kind === 'inbox' && sec.items.length > state.standaloneLimit) {
+          const more = el('button', 'agy-req-more', `${t.showMore} (${sec.items.length - state.standaloneLimit})`);
+          more.type = 'button';
+          more.addEventListener('click', () => {
+            state.standaloneLimit += 40;
+            render();
+          });
+          secEl.appendChild(more);
         }
       }
+
+      viewport.appendChild(secEl);
     }
+
+    viewport.addEventListener('scroll', () => {
+      state.scrollTop = viewport.scrollTop;
+    });
+    host.appendChild(viewport);
+    requestAnimationFrame(() => {
+      if (state.scrollTop && viewport.isConnected) viewport.scrollTop = state.scrollTop;
+    });
   }
+
+  // When user selects any official Group By option (Project / Repo / Environment / Status / None), yield back to official AGY immediately
+  const onNativeMenuSelect = e => {
+    const item = e.target?.closest?.('[role="menuitemradio"]');
+    if (!item || item.id === MENU_OPT_ID) return;
+    const optSpan = item.querySelector('[data-testid^="group-by-option-"]');
+    if (!optSpan) return;
+    if (state.prefs.groupByRequirement) {
+      state.scrollTop = 0;
+      void updatePrefs({ groupByRequirement: false });
+    }
+  };
+  document.addEventListener('click', onNativeMenuSelect, true);
 
   let polling = false;
   async function pollTree(force = false) {
@@ -906,6 +650,7 @@ module.exports = function mountProjectSidebarWidget() {
       if (res && !res.offline) {
         state.tree = res;
         if (res.preferences) state.prefs = { ...state.prefs, ...res.preferences };
+        syncOfficialMenus();
         render();
       }
     } finally {
@@ -914,28 +659,19 @@ module.exports = function mountProjectSidebarWidget() {
   }
 
   let layoutScheduled = false;
-  const scheduleLayoutRender = () => {
+  const scheduleSyncAndRender = () => {
     if (layoutScheduled) return;
     layoutScheduled = true;
     requestAnimationFrame(() => {
       layoutScheduled = false;
+      syncOfficialMenus();
       render();
     });
   };
 
-  const onDocumentClick = e => {
-    if (!state.popoverOpen) return;
-    const pop = document.getElementById('agy-req-popover');
-    const trigger = document.getElementById('agy-req-filter-trigger');
-    if (pop?.contains(e.target) || trigger?.contains(e.target)) return;
-    state.popoverOpen = false;
-    render();
-  };
-  document.addEventListener('click', onDocumentClick, true);
-
-  const ro = new ResizeObserver(scheduleLayoutRender);
+  const ro = new ResizeObserver(scheduleSyncAndRender);
   const attachObserved = () => {
-    const target = document.querySelector('[data-testid="conversation-list-sidebar"]')?.parentElement?.parentElement || document.body;
+    const target = document.querySelector('[data-testid="conversation-list-sidebar"]') || document.body;
     ro.disconnect();
     ro.observe(target);
   };
@@ -943,17 +679,23 @@ module.exports = function mountProjectSidebarWidget() {
 
   const mo = new MutationObserver(mutations => {
     const host = document.getElementById(HOST_ID);
-    const hasExternal = mutations.some(m => !host || (m.target !== host && !host.contains(m.target)));
+    const hasExternal = mutations.some(m => {
+      if (!host) return true;
+      if (m.target === host || host.contains(m.target)) return false;
+      if (m.target?.id === MENU_OPT_ID || m.target?.closest?.(`#${MENU_OPT_ID}`)) return false;
+      return true;
+    });
     if (!hasExternal) return;
     attachObserved();
-    scheduleLayoutRender();
+    scheduleSyncAndRender();
   });
   mo.observe(document.body, { childList: true, subtree: true });
 
-  window.addEventListener('resize', scheduleLayoutRender);
-  window.addEventListener('popstate', scheduleLayoutRender);
+  window.addEventListener('resize', scheduleSyncAndRender);
+  window.addEventListener('popstate', scheduleSyncAndRender);
 
   const pollTimer = setInterval(() => void pollTree(false), 4000);
+  syncOfficialMenus();
   render();
   void pollTree(true);
 
@@ -961,10 +703,13 @@ module.exports = function mountProjectSidebarWidget() {
     clearInterval(pollTimer);
     ro.disconnect();
     mo.disconnect();
-    clearOffsetClass();
-    document.removeEventListener('click', onDocumentClick, true);
-    window.removeEventListener('resize', scheduleLayoutRender);
-    window.removeEventListener('popstate', scheduleLayoutRender);
+    clearListClass();
+    document.removeEventListener('click', onNativeMenuSelect, true);
+    document.getElementById(MENU_OPT_ID)?.remove();
+    for (const n of document.querySelectorAll('[data-agy-req-groupby]')) n.removeAttribute('data-agy-req-groupby');
+    for (const n of document.querySelectorAll('.agy-req-submenu-active')) n.classList.remove('agy-req-submenu-active');
+    window.removeEventListener('resize', scheduleSyncAndRender);
+    window.removeEventListener('popstate', scheduleSyncAndRender);
     document.getElementById(HOST_ID)?.remove();
     document.getElementById(STYLE_ID)?.remove();
     delete window.__agyProjectSidebarInstalled;
