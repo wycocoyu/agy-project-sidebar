@@ -1,0 +1,21 @@
+{
+  "name": "agy-project-sidebar",
+  "displayName": "AGY Project Sidebar",
+  "version": "0.1.0",
+  "description": "Persistent Project × Requirement × Session tree sidebar for Antigravity via Sidecar + loopback CDP runtime injection.",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "wycocoyu",
+    "url": "https://github.com/wycocoyu"
+  },
+  "homepage": "https://github.com/wycocoyu/agy-project-sidebar",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wycocoyu/agy-project-sidebar.git"
+  },
+  "suggestedPrompts": [
+    "Group my Antigravity conversations by Project and Requirement",
+    "Show only running or active issue threads across workspaces",
+    "Check agy-project-sidebar sidecar status and CDP attachment"
+  ]
+}

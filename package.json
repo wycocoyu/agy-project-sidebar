@@ -1,0 +1,11 @@
+{
+  "name": "agy-project-sidebar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent Project × Requirement × Session tree sidebar plugin for Antigravity (agy)",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}
