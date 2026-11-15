@@ -4,11 +4,13 @@ import { dirname } from 'node:path';
 import { platformPaths } from './platform.mjs';
 
 const VALID_LANGUAGES = new Set(['zh-CN', 'en']);
+export const VALID_DIMENSIONS = ['project', 'requirement', 'repo', 'location', 'status'];
+const VALID_DIM_SET = new Set(VALID_DIMENSIONS);
 
 export const DEFAULT_PREFERENCES = Object.freeze({
   language: 'zh-CN',
-  groupByRequirement: false,
-  collapsedReqKeys: [],
+  groupByDimensions: null,
+  collapsedGroupKeys: [],
   showArchived: false,
 });
 
@@ -17,27 +19,45 @@ export function normalizePreferences(raw = {}, fallback = DEFAULT_PREFERENCES) {
   const language = VALID_LANGUAGES.has(raw.language)
     ? raw.language
     : (VALID_LANGUAGES.has(base.language) ? base.language : DEFAULT_PREFERENCES.language);
-  const groupByRequirement = typeof raw.groupByRequirement === 'boolean'
-    ? raw.groupByRequirement
-    : Boolean(base.groupByRequirement);
   const showArchived = typeof raw.showArchived === 'boolean'
     ? raw.showArchived
     : Boolean(base.showArchived);
 
-  let collapsedReqKeys = Array.isArray(base.collapsedReqKeys) ? [...base.collapsedReqKeys] : [];
-  if (Array.isArray(raw.collapsedReqKeys)) {
+  let groupByDimensions = Array.isArray(base.groupByDimensions) ? [...base.groupByDimensions] : null;
+  if ('groupByDimensions' in raw) {
+    if (raw.groupByDimensions === null) {
+      groupByDimensions = null;
+    } else if (Array.isArray(raw.groupByDimensions)) {
+      const seen = new Set();
+      groupByDimensions = [];
+      for (const dim of raw.groupByDimensions) {
+        if (typeof dim === 'string' && VALID_DIM_SET.has(dim) && !seen.has(dim)) {
+          seen.add(dim);
+          groupByDimensions.push(dim);
+        }
+      }
+    }
+  } else if (raw.groupByRequirement === true && groupByDimensions === null) {
+    groupByDimensions = ['requirement'];
+  }
+
+  let collapsedGroupKeys = Array.isArray(base.collapsedGroupKeys) ? [...base.collapsedGroupKeys] : [];
+  const rawCollapsed = Array.isArray(raw.collapsedGroupKeys)
+    ? raw.collapsedGroupKeys
+    : (Array.isArray(raw.collapsedReqKeys) ? raw.collapsedReqKeys : null);
+  if (rawCollapsed) {
     const seen = new Set();
-    collapsedReqKeys = [];
-    for (const item of raw.collapsedReqKeys) {
-      if (typeof item === 'string' && item.length > 0 && item.length <= 256 && !seen.has(item)) {
+    collapsedGroupKeys = [];
+    for (const item of rawCollapsed) {
+      if (typeof item === 'string' && item.length > 0 && item.length <= 320 && !seen.has(item)) {
         seen.add(item);
-        collapsedReqKeys.push(item);
-        if (collapsedReqKeys.length >= 500) break;
+        collapsedGroupKeys.push(item);
+        if (collapsedGroupKeys.length >= 800) break;
       }
     }
   }
 
-  return { language, groupByRequirement, collapsedReqKeys, showArchived };
+  return { language, groupByDimensions, collapsedGroupKeys, showArchived };
 }
 
 async function atomicWriteJson(file, payload) {

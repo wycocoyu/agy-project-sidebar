@@ -1,16 +1,38 @@
 module.exports = function createI18n(lang = 'zh-CN') {
   const dict = {
     'zh-CN': {
-      menuOption: 'Requirement',
+      labels: {
+        project: 'Project',
+        requirement: 'Requirement',
+        repo: 'Repo',
+        location: 'Environment',
+        status: 'Status',
+        none: 'None',
+      },
       standalone: 'Standalone',
+      statusBlocked: 'Blocked',
+      statusInProgress: 'In Progress',
+      statusIdle: 'Idle',
+      envLocal: 'This Computer',
+      envCloud: 'Remote',
       showMore: 'Show more',
-      empty: 'No conversations found',
     },
     en: {
-      menuOption: 'Requirement',
+      labels: {
+        project: 'Project',
+        requirement: 'Requirement',
+        repo: 'Repo',
+        location: 'Environment',
+        status: 'Status',
+        none: 'None',
+      },
       standalone: 'Standalone',
+      statusBlocked: 'Blocked',
+      statusInProgress: 'In Progress',
+      statusIdle: 'Idle',
+      envLocal: 'This Computer',
+      envCloud: 'Remote',
       showMore: 'Show more',
-      empty: 'No conversations found',
     },
   };
   return dict[lang] || dict['zh-CN'];
