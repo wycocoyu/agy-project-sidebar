@@ -1,0 +1,20 @@
+{
+  "command": "node",
+  "args": [
+    "main.mjs"
+  ],
+  "restart_policy": "always",
+  "display_name": "AGY Project Sidebar",
+  "description": "Persistent Project × Requirement × Session tree sidebar for Antigravity via Sidecar + loopback CDP runtime injection.",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "AGY Project Sidebar",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "AGY Project Sidebar"
+      }
+    ]
+  }
+}
