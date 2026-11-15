@@ -9,7 +9,7 @@ import { DEFAULT_PREFERENCES, PreferencesStore } from '../compat/preferences.mjs
 
 const require = createRequire(import.meta.url);
 
-test('renderer source and validTarget strictly isolate namespaces and use native requirement filter UI', () => {
+test('renderer source strictly isolates namespaces, removes custom bars, and injects official Group By option', () => {
   const i18n = readFileSync(new URL('../compat/i18n.cjs', import.meta.url), 'utf8');
   const widget = readFileSync(new URL('../compat/sidebar-widget.cjs', import.meta.url), 'utf8');
   const src = makeRendererSource(i18n, widget, 'owner-1', 1000);
@@ -18,10 +18,11 @@ test('renderer source and validTarget strictly isolate namespaces and use native
   assert.equal(src.includes('ag-pulse-status-bar'), false);
   assert.equal(src.includes('agy-ps-drawer'), false);
   assert.equal(src.includes('agy-ps-restore-pill'), false);
+  assert.equal(src.includes('agy-project-sidebar-filter-bar'), false);
   assert.equal(src.includes('__agyProjectSidebarCallV1'), true);
   assert.equal(src.includes('agy-project-sidebar-host'), true);
-  assert.equal(src.includes('agy-project-sidebar-filter-bar'), true);
-  assert.equal(src.includes('agy-req-results-panel'), true);
+  assert.equal(src.includes('agy-group-by-option-requirement'), true);
+  assert.equal(src.includes('group-by-submenu-trigger'), true);
 
   assert.equal(validTarget({
     type: 'page',
@@ -36,8 +37,8 @@ test('renderer source and validTarget strictly isolate namespaces and use native
   }, 9222), false);
 
   const createI18n = require('../compat/i18n.cjs');
-  assert.equal(createI18n('zh-CN').filterPrefix, '需求');
-  assert.equal(createI18n('en').filterPrefix, 'Req');
+  assert.equal(createI18n('zh-CN').menuOption, 'Requirement');
+  assert.equal(createI18n('en').menuOption, 'Requirement');
 });
 
 test('PreferencesStore validates fields and persists atomically', async () => {
@@ -46,24 +47,28 @@ test('PreferencesStore validates fields and persists atomically', async () => {
     const store = new PreferencesStore(join(dir, 'preferences.json'));
     const initial = await store.get();
     assert.deepEqual(initial, DEFAULT_PREFERENCES);
-    assert.deepEqual(DEFAULT_PREFERENCES, { language: 'zh-CN', selectedReqKey: null, showArchived: false });
+    assert.deepEqual(DEFAULT_PREFERENCES, {
+      language: 'zh-CN',
+      groupByRequirement: false,
+      collapsedReqKeys: [],
+      showArchived: false,
+    });
 
     const updated = await store.set({
       language: 'en',
-      selectedReqKey: 'ISSUE:MUL-797',
+      groupByRequirement: true,
+      collapsedReqKeys: ['ISSUE:MUL-797', 'ISSUE:MUL-797', 'ISSUE:Q137'],
       showArchived: true,
     });
     assert.equal(updated.language, 'en');
-    assert.equal(updated.selectedReqKey, 'ISSUE:MUL-797');
+    assert.equal(updated.groupByRequirement, true);
+    assert.deepEqual(updated.collapsedReqKeys, ['ISSUE:MUL-797', 'ISSUE:Q137']);
     assert.equal(updated.showArchived, true);
 
-    const invalid = await store.set({ language: 'fr', selectedReqKey: 123, showArchived: 'yes' });
+    const invalid = await store.set({ language: 'fr', groupByRequirement: 'yes', collapsedReqKeys: [123, ''] });
     assert.equal(invalid.language, 'en');
-    assert.equal(invalid.selectedReqKey, 'ISSUE:MUL-797');
-    assert.equal(invalid.showArchived, true);
-
-    const cleared = await store.set({ selectedReqKey: null });
-    assert.equal(cleared.selectedReqKey, null);
+    assert.equal(invalid.groupByRequirement, true);
+    assert.deepEqual(invalid.collapsedReqKeys, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

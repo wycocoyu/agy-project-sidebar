@@ -5,7 +5,7 @@
   ],
   "restart_policy": "always",
   "display_name": "AGY Project Sidebar",
-  "description": "Persistent Requirement Filter embedded cleanly into Antigravity's native conversation sidebar via Sidecar + loopback CDP.",
+  "description": "Adds Requirement grouping directly into Antigravity's official Display Options -> Group By menu with zero extra sidebar bars.",
   "has_web_ui": true,
   "ui_config": {
     "display_name": "AGY Project Sidebar",

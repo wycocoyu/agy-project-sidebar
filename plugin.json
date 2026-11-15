@@ -2,7 +2,7 @@
   "name": "agy-project-sidebar",
   "displayName": "AGY Project Sidebar",
   "version": "0.1.0",
-  "description": "Persistent Requirement Filter embedded cleanly into Antigravity's native conversation sidebar via Sidecar + loopback CDP.",
+  "description": "Adds Requirement grouping directly into Antigravity's official Display Options -> Group By menu with zero extra sidebar bars.",
   "logo": "assets/logo.svg",
   "author": {
     "name": "wycocoyu",
