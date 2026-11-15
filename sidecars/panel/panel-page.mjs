@@ -19,54 +19,68 @@ export function auxPanelHtml() {
     .card { border: 1px solid rgba(127,127,127,0.22); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: rgba(127,127,127,0.04); }
     .muted { font-size: 12px; color: #656d76; }
     .btn { border: 1px solid rgba(127,127,127,0.25); background: transparent; color: inherit; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
-    .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed rgba(127,127,127,0.16); }
+    .row { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-bottom: 1px dashed rgba(127,127,127,0.16); cursor: pointer; }
     .row:last-child { border-bottom: none; }
+    .row:hover { opacity: 0.8; }
   </style>
 </head>
 <body>
   <div class="hdr">
-    <div class="title">AGY Project Sidebar</div>
+    <div class="title">AGY Requirement Filter</div>
     <span id="status-pill" class="pill">Checking...</span>
   </div>
   <div class="card">
-    <div id="stats" style="font-weight:600;">Loading project &amp; requirement tree...</div>
+    <div id="stats" style="font-weight:600;">Loading requirements...</div>
+    <div id="filter-state" class="muted" style="margin-top:4px;"></div>
     <div id="health" class="muted" style="margin-top:4px;"></div>
     <div style="margin-top:8px; display:flex; gap:8px;">
-      <button class="btn" id="btn-tree">Use Project Tree Mode</button>
-      <button class="btn" id="btn-native">Use Native List</button>
+      <button class="btn" id="btn-clear">Clear Requirement Filter</button>
     </div>
   </div>
-  <div class="card" id="projects-card"></div>
+  <div class="card" id="reqs-card"></div>
   <script type="module">
+    async function setReq(selectedReqKey) {
+      await fetch('/api/preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selectedReqKey }) });
+      load();
+    }
     async function load() {
       const [treeRes, healthRes] = await Promise.all([
-        fetch('/api/tree').then(r => r.json()).catch(() => ({ projects: [], stats: {} })),
+        fetch('/api/tree').then(r => r.json()).catch(() => ({ projects: [], conversations: [], stats: {}, preferences: {} })),
         fetch('/api/integration').then(r => r.json()).catch(() => ({ state: 'unknown', message: '' })),
       ]);
       document.getElementById('status-pill').textContent = healthRes.state || 'unknown';
       const s = treeRes.stats || {};
-      document.getElementById('stats').textContent = (s.totalProjects || 0) + ' Projects · ' + (s.totalConversations || 0) + ' Conversations · ' + (s.runningCount || 0) + ' Running';
+      const convs = treeRes.conversations || [];
+      const reqMap = new Map();
+      for (const c of convs) {
+        if (c.reqKind === 'inbox') continue;
+        if (!reqMap.has(c.reqKey)) reqMap.set(c.reqKey, { key: c.reqKey, label: c.reqLabel || c.reqKey, total: 0, running: 0, latestMs: 0 });
+        const item = reqMap.get(c.reqKey);
+        item.total += 1;
+        if (c.status === 'running') item.running += 1;
+        if ((c.updatedAtMs || 0) > item.latestMs) item.latestMs = c.updatedAtMs || 0;
+      }
+      const reqs = [...reqMap.values()].sort((a, b) => b.latestMs - a.latestMs);
+      document.getElementById('stats').textContent = reqs.length + ' Requirements · ' + (s.totalConversations || 0) + ' Conversations · ' + (s.runningCount || 0) + ' Running';
+      const selected = treeRes.preferences?.selectedReqKey;
+      document.getElementById('filter-state').textContent = 'Active filter: ' + (selected || 'All (Native List)');
       document.getElementById('health').textContent = healthRes.message || '';
-      const box = document.getElementById('projects-card');
+      const box = document.getElementById('reqs-card');
       box.textContent = '';
-      for (const p of (treeRes.projects || []).slice(0, 20)) {
+      for (const r of reqs.slice(0, 20)) {
         const row = document.createElement('div');
         row.className = 'row';
         const left = document.createElement('span');
-        left.textContent = p.isUnassigned ? 'Unassigned' : p.name;
+        left.textContent = r.label;
         const right = document.createElement('span');
         right.className = 'muted';
-        right.textContent = (p.running ? p.running + ' running / ' : '') + p.total + ' chats';
+        right.textContent = (r.running ? r.running + ' running / ' : '') + r.total + ' chats';
         row.append(left, right);
+        row.addEventListener('click', () => setReq(r.key));
         box.appendChild(row);
       }
     }
-    async function setMode(viewMode) {
-      await fetch('/api/preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewMode }) });
-      load();
-    }
-    document.getElementById('btn-tree').addEventListener('click', () => setMode('tree'));
-    document.getElementById('btn-native').addEventListener('click', () => setMode('native'));
+    document.getElementById('btn-clear').addEventListener('click', () => setReq(null));
     load();
     setInterval(load, 5000);
   </script>
