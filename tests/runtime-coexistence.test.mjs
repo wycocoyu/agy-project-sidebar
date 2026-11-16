@@ -55,6 +55,12 @@ test('PreferencesStore validates multi-select groupByDimensions and persists ato
       groupByDimensions: null,
       collapsedGroupKeys: [],
       showArchived: false,
+      inboxEnabled: true,
+      inboxEnabledAtMs: 0,
+      inboxAutoRetireHours: 24,
+      inboxSettled: {},
+      inboxFollowUp: {},
+      inboxSnoozed: {},
     });
 
     const updated = await store.set({
@@ -62,11 +68,22 @@ test('PreferencesStore validates multi-select groupByDimensions and persists ato
       groupByDimensions: ['status', 'requirement', 'status', 'invalid_dim'],
       collapsedGroupKeys: ['status:idle/req:ISSUE:MUL-797', 'status:idle/req:ISSUE:MUL-797', 'status:idle/req:ISSUE:Q137'],
       showArchived: true,
+      inboxEnabled: true,
+      inboxEnabledAtMs: 1700000000123,
+      inboxAutoRetireHours: 48,
+      inboxSettled: { 'c-1': { atMs: 1700000100000, updatedMs: 1700000090000 }, bad: 'nope' },
+      inboxFollowUp: { 'c-2': 1700000200000, bad: -5 },
+      inboxSnoozed: { 'c-3': { untilMs: 1700005000000, setAtMs: 1700000300000, updatedMs: 1700000000000 } },
     });
     assert.equal(updated.language, 'en');
     assert.deepEqual(updated.groupByDimensions, ['status', 'requirement']);
     assert.deepEqual(updated.collapsedGroupKeys, ['status:idle/req:ISSUE:MUL-797', 'status:idle/req:ISSUE:Q137']);
     assert.equal(updated.showArchived, true);
+    assert.equal(updated.inboxEnabledAtMs, 1700000000123);
+    assert.equal(updated.inboxAutoRetireHours, 48);
+    assert.deepEqual(updated.inboxSettled, { 'c-1': { atMs: 1700000100000, updatedMs: 1700000090000 } });
+    assert.deepEqual(updated.inboxFollowUp, { 'c-2': 1700000200000 });
+    assert.deepEqual(updated.inboxSnoozed, { 'c-3': { untilMs: 1700005000000, setAtMs: 1700000300000, updatedMs: 1700000000000 } });
 
     const cleared = await store.set({ groupByDimensions: [] });
     assert.deepEqual(cleared.groupByDimensions, []);
@@ -74,10 +91,11 @@ test('PreferencesStore validates multi-select groupByDimensions and persists ato
     const reset = await store.set({ groupByDimensions: null });
     assert.equal(reset.groupByDimensions, null);
 
-    const invalid = await store.set({ language: 'fr', groupByDimensions: 'bad', collapsedGroupKeys: [123, ''] });
+    const invalid = await store.set({ language: 'fr', groupByDimensions: 'bad', collapsedGroupKeys: [123, ''], inboxAutoRetireHours: 99 });
     assert.equal(invalid.language, 'en');
     assert.equal(invalid.groupByDimensions, null);
     assert.deepEqual(invalid.collapsedGroupKeys, []);
+    assert.equal(invalid.inboxAutoRetireHours, 48);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -250,4 +268,151 @@ test('Requirement, Status + Requirement, and Requirement + Status produce distin
   assert.ok(innerProg && innerProg._agyDepth === 1 && innerProg.count === 1);
   assert.ok(innerIdle && innerIdle._agyDepth === 1 && innerIdle.count === 3);
   assert.equal(itemsRS[itemsRS.length - 1].label, 'Standalone');
+});
+
+test('Inbox Triage state machine covers watermark, read-stays-in-inbox, 24h auto-retire, follow-up, snooze, settle, and layout integration', () => {
+  const widgetMount = require('../compat/sidebar-widget.cjs');
+  const { classifyInboxConversation, partitionInboxBuckets, buildVirtualItemsForDims } = widgetMount({ __unitTestOnly: true });
+
+  const hr = 3600_000;
+  const t0 = 1_700_000_000_000;
+  const now = t0 + 10 * hr;
+
+  const baseInbox = {
+    enabled: true,
+    enabledAtMs: t0,
+    autoRetireHours: 24,
+    settled: {
+      'settled-still': { atMs: t0 + 2 * hr, updatedMs: t0 + 1 * hr },
+      'settled-newturn': { atMs: t0 + 2 * hr, updatedMs: t0 + 1 * hr },
+    },
+    followUp: {
+      'followup-old': t0 - 10 * hr,
+      'followup-newturn': t0 + 3 * hr,
+    },
+    snoozed: {
+      'snoozed-future': { untilMs: now + 2 * hr, setAtMs: t0 + 4 * hr, updatedMs: t0 + 3 * hr },
+      'snoozed-woke': { untilMs: now - 30 * 60_000, setAtMs: t0 + 1 * hr, updatedMs: t0 - 72 * hr },
+      'snoozed-early-turn': { untilMs: now + 5 * hr, setAtMs: t0 + 4 * hr, updatedMs: t0 + 3 * hr },
+      'snoozed-expired-old': { untilMs: now - 30 * hr, setAtMs: t0 - 35 * hr, updatedMs: t0 - 40 * hr },
+    },
+  };
+
+  // 1) Historical pre-watermark idle stays in Idle
+  assert.equal(
+    classifyInboxConversation({ id: 'hist', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 - 2 * hr }, baseInbox, now).bucket,
+    'idle',
+  );
+
+  // 2) Active running stays active (Blocked / In Progress)
+  assert.equal(
+    classifyInboxConversation({ id: 'run', statusGroup: 'in_progress', isUnread: false, updatedAtMs: now - 1000 }, baseInbox, now).bucket,
+    'active',
+  );
+
+  // 3) Read ≠ Settled: opening clears isUnread, but conversation remains in Inbox within 24h
+  const readRecent = classifyInboxConversation({ id: 'read-recent', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 + 5 * hr }, baseInbox, now);
+  assert.equal(readRecent.bucket, 'inbox');
+  assert.equal(readRecent.reason, 'new_idle');
+
+  // 4) 24h auto-retire removes unpinned read item after autoRetireHours
+  assert.equal(
+    classifyInboxConversation(
+      { id: 'auto-old', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 25 * hr },
+      { ...baseInbox, enabledAtMs: t0 - 30 * hr },
+      now,
+    ).bucket,
+    'idle',
+  );
+
+  // 5) Follow-up stays in Inbox even > 72h past updatedAtMs
+  const followOld = classifyInboxConversation({ id: 'followup-old', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 - 96 * hr }, baseInbox, now);
+  assert.equal(followOld.bucket, 'inbox');
+  assert.equal(followOld.isFollowUp, true);
+
+  // 6) New user prompt + new AI reply after Follow-up clears Follow-up exemption back into normal Inbox confirmation
+  const followReset = classifyInboxConversation(
+    { id: 'followup-newturn', statusGroup: 'idle', isUnread: true, userInputAtMs: t0 + 8 * hr, updatedAtMs: t0 + 9 * hr },
+    baseInbox,
+    now,
+  );
+  assert.equal(followReset.bucket, 'inbox');
+  assert.equal(Boolean(followReset.isFollowUp), false);
+
+  // 7) Settle keeps idle until new turn finishes, then re-enters Inbox automatically
+  assert.equal(
+    classifyInboxConversation({ id: 'settled-still', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 + 1 * hr }, baseInbox, now).bucket,
+    'idle',
+  );
+  assert.equal(
+    classifyInboxConversation({ id: 'settled-newturn', statusGroup: 'idle', isUnread: true, updatedAtMs: t0 + 9 * hr }, baseInbox, now).bucket,
+    'inbox',
+  );
+
+  // 8) Snooze hides until due, wakes early on new turn, grants full autoRetireHours from wokeAtMs, then retires later
+  assert.equal(
+    classifyInboxConversation({ id: 'snoozed-future', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 + 3 * hr }, baseInbox, now).bucket,
+    'snoozed',
+  );
+  const woke = classifyInboxConversation({ id: 'snoozed-woke', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 - 72 * hr }, baseInbox, now);
+  assert.equal(woke.bucket, 'inbox');
+  assert.equal(woke.isWoke, true);
+  assert.equal(
+    classifyInboxConversation({ id: 'snoozed-early-turn', statusGroup: 'idle', isUnread: true, updatedAtMs: t0 + 8 * hr }, baseInbox, now).bucket,
+    'inbox',
+  );
+  assert.equal(
+    classifyInboxConversation({ id: 'snoozed-expired-old', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 - 40 * hr }, baseInbox, now).bucket,
+    'idle',
+  );
+
+  // 9) Manual Mark Unread surfaces historical conversation in Inbox
+  assert.equal(
+    classifyInboxConversation({ id: 'manual-unread', statusGroup: 'idle', isUnread: true, markedAsUnread: true, updatedAtMs: t0 - 50 * hr }, baseInbox, now).bucket,
+    'inbox',
+  );
+
+  // 10) Status + Status+Requirement layouts place Inbox + collapsed Snoozed below Active and above Idle with unique cascadeIds
+  const sample = [
+    { id: 'c-run', title: '1115 | 功能 | #9 active work', statusGroup: 'in_progress', isUnread: false, updatedAtMs: now - 1000 },
+    { id: 'read-recent', title: '1115 | 功能 | #9 reviewed awaiting settle', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 + 5 * hr },
+    { id: 'followup-old', title: '1114 | 调试 | pinned follow up', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 - 96 * hr },
+    { id: 'snoozed-future', title: '1115 | 分析 | snoozed item', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 + 3 * hr },
+    { id: 'hist', title: '1101 | 调研 | older settled work', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 - 2 * hr },
+  ];
+
+  for (const dims of [['status'], ['status', 'requirement']]) {
+    const items = buildVirtualItemsForDims(sample, dims, { inbox: baseInbox, nowMs: now });
+    const progI = items.findIndex(x => x.id === 'header-status-in-progress');
+    const inboxI = items.findIndex(x => x.id === 'header-inbox');
+    const snoozeI = items.findIndex(x => x.id === 'header-inbox-snoozed');
+    const idleI = items.findIndex(x => x.id === 'header-status-idle');
+
+    assert.ok(progI >= 0 && progI < inboxI && inboxI < snoozeI && snoozeI < idleI);
+    assert.equal(items[inboxI].count, 2);
+    assert.equal(items[inboxI].isCollapsed, false);
+    assert.equal(items[snoozeI].count, 1);
+    assert.equal(items[snoozeI].isCollapsed, true);
+    assert.equal(items.some(x => x.type === 'row' && x.cascadeId === 'snoozed-future'), false);
+
+    // Every emitted row cascadeId appears at most once
+    const rowIds = items.filter(x => x.type === 'row').map(x => x.cascadeId);
+    assert.equal(new Set(rowIds).size, rowIds.length);
+  }
+
+  // Expanding Snoozed reveals snoozed row cleanly
+  const expItems = buildVirtualItemsForDims(sample, ['status'], {
+    inbox: baseInbox,
+    nowMs: now,
+    collapsedKeys: ['exp:inbox:snoozed'],
+  });
+  assert.equal(expItems.some(x => x.type === 'row' && x.cascadeId === 'snoozed-future'), true);
+
+  // partitionInboxBuckets ranks Unread/Woke > Follow-up > Regular recent
+  const ranked = partitionInboxBuckets([
+    { id: 'read-recent', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 1000 },
+    { id: 'followup-old', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 - 96 * hr },
+    { id: 'snoozed-woke', statusGroup: 'idle', isUnread: false, updatedAtMs: t0 - 72 * hr },
+  ], baseInbox, now);
+  assert.deepEqual(ranked.inboxEntries.map(e => e.conv.id), ['snoozed-woke', 'followup-old', 'read-recent']);
 });

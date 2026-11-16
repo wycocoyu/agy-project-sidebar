@@ -83,6 +83,10 @@ if (!claimOwnership()) {
 
 const collector = new SidebarCollector(paths);
 const preferences = new PreferencesStore(paths.preferences);
+const initialPrefs = await preferences.get();
+if (initialPrefs.inboxEnabled !== false && !initialPrefs.inboxEnabledAtMs) {
+  await preferences.set({ inboxEnabledAtMs: Date.now() });
+}
 const i18nSource = readFileSync(join(COMPAT, 'i18n.cjs'), 'utf8');
 const widgetSource = readFileSync(join(COMPAT, 'sidebar-widget.cjs'), 'utf8');
 

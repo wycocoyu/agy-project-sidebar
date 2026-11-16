@@ -6,13 +6,62 @@ import { platformPaths } from './platform.mjs';
 const VALID_LANGUAGES = new Set(['zh-CN', 'en']);
 export const VALID_DIMENSIONS = ['project', 'requirement', 'repo', 'location', 'status'];
 const VALID_DIM_SET = new Set(VALID_DIMENSIONS);
+export const VALID_RETIRE_HOURS = [12, 24, 48, 168];
+const VALID_RETIRE_SET = new Set(VALID_RETIRE_HOURS);
 
 export const DEFAULT_PREFERENCES = Object.freeze({
   language: 'zh-CN',
   groupByDimensions: null,
   collapsedGroupKeys: [],
   showArchived: false,
+  inboxEnabled: true,
+  inboxEnabledAtMs: 0,
+  inboxAutoRetireHours: 24,
+  inboxSettled: Object.freeze({}),
+  inboxFollowUp: Object.freeze({}),
+  inboxSnoozed: Object.freeze({}),
 });
+
+function toNonNegInt(value, fallback = 0) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : fallback;
+}
+
+function sanitizeIdMap(rawMap, parseEntry, sortValue, maxEntries) {
+  if (!rawMap || typeof rawMap !== 'object' || Array.isArray(rawMap)) return {};
+  const entries = [];
+  for (const [key, val] of Object.entries(rawMap)) {
+    if (typeof key !== 'string' || !key || key.length > 128) continue;
+    const parsed = parseEntry(val);
+    if (parsed != null) entries.push([key, parsed]);
+  }
+  if (entries.length > maxEntries) {
+    entries.sort((a, b) => sortValue(b[1]) - sortValue(a[1]));
+    entries.length = maxEntries;
+  }
+  return Object.fromEntries(entries);
+}
+
+function parseSettledEntry(val) {
+  if (typeof val === 'number') {
+    const atMs = toNonNegInt(val, 0);
+    return atMs > 0 ? { atMs, updatedMs: atMs } : null;
+  }
+  if (!val || typeof val !== 'object' || Array.isArray(val)) return null;
+  const atMs = toNonNegInt(val.atMs, 0);
+  if (atMs <= 0) return null;
+  const updatedMs = toNonNegInt(val.updatedMs, 0);
+  const out = { atMs, updatedMs };
+  if (val.settledMarkedUnread === true) out.settledMarkedUnread = true;
+  return out;
+}
+
+function parseSnoozedEntry(val) {
+  if (!val || typeof val !== 'object' || Array.isArray(val)) return null;
+  const untilMs = toNonNegInt(val.untilMs, 0);
+  const setAtMs = toNonNegInt(val.setAtMs, 0);
+  if (untilMs <= 0 || setAtMs <= 0) return null;
+  return { untilMs, setAtMs, updatedMs: toNonNegInt(val.updatedMs, 0) };
+}
 
 export function normalizePreferences(raw = {}, fallback = DEFAULT_PREFERENCES) {
   const base = fallback && typeof fallback === 'object' ? fallback : DEFAULT_PREFERENCES;
@@ -22,6 +71,15 @@ export function normalizePreferences(raw = {}, fallback = DEFAULT_PREFERENCES) {
   const showArchived = typeof raw.showArchived === 'boolean'
     ? raw.showArchived
     : Boolean(base.showArchived);
+  const inboxEnabled = typeof raw.inboxEnabled === 'boolean'
+    ? raw.inboxEnabled
+    : (typeof base.inboxEnabled === 'boolean' ? base.inboxEnabled : DEFAULT_PREFERENCES.inboxEnabled);
+  const inboxEnabledAtMs = 'inboxEnabledAtMs' in raw
+    ? toNonNegInt(raw.inboxEnabledAtMs, toNonNegInt(base.inboxEnabledAtMs, 0))
+    : toNonNegInt(base.inboxEnabledAtMs, 0);
+  const inboxAutoRetireHours = VALID_RETIRE_SET.has(raw.inboxAutoRetireHours)
+    ? raw.inboxAutoRetireHours
+    : (VALID_RETIRE_SET.has(base.inboxAutoRetireHours) ? base.inboxAutoRetireHours : DEFAULT_PREFERENCES.inboxAutoRetireHours);
 
   let groupByDimensions = Array.isArray(base.groupByDimensions) ? [...base.groupByDimensions] : null;
   if ('groupByDimensions' in raw) {
@@ -57,7 +115,30 @@ export function normalizePreferences(raw = {}, fallback = DEFAULT_PREFERENCES) {
     }
   }
 
-  return { language, groupByDimensions, collapsedGroupKeys, showArchived };
+  const rawSettled = 'inboxSettled' in raw ? raw.inboxSettled : base.inboxSettled;
+  const inboxSettled = sanitizeIdMap(rawSettled, parseSettledEntry, v => v.atMs, 1000);
+
+  const rawFollowUp = 'inboxFollowUp' in raw ? raw.inboxFollowUp : base.inboxFollowUp;
+  const inboxFollowUp = sanitizeIdMap(rawFollowUp, v => {
+    const ts = toNonNegInt(v, 0);
+    return ts > 0 ? ts : null;
+  }, v => v, 500);
+
+  const rawSnoozed = 'inboxSnoozed' in raw ? raw.inboxSnoozed : base.inboxSnoozed;
+  const inboxSnoozed = sanitizeIdMap(rawSnoozed, parseSnoozedEntry, v => v.setAtMs, 500);
+
+  return {
+    language,
+    groupByDimensions,
+    collapsedGroupKeys,
+    showArchived,
+    inboxEnabled,
+    inboxEnabledAtMs,
+    inboxAutoRetireHours,
+    inboxSettled,
+    inboxFollowUp,
+    inboxSnoozed,
+  };
 }
 
 async function atomicWriteJson(file, payload) {

@@ -238,6 +238,7 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     const projMatch = resolveProjectForConversation(row, projectsById, realProjects);
     const reqDesc = extractRequirementDescriptor(row.title);
     const updatedAtMs = parseTimestampMs(row.last_modified_time);
+    const userInputAtMs = parseTimestampMs(row.last_user_input_time);
     const isRunning = row.status === 'CASCADE_RUN_STATUS_RUNNING' || row.status === 'CASCADE_RUN_STATUS_BUSY';
     const notFullyIdle = Boolean(row.not_fully_idle);
     const statusGroup = row.status === 'CASCADE_RUN_STATUS_WAITING'
@@ -259,6 +260,7 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
       isArchived,
       notFullyIdle,
       updatedAtMs,
+      userInputAtMs,
       projectKey: projMatch.projectKey,
       projectName: projMatch.projectName,
       realProjectId: projMatch.realProjectId,
@@ -505,8 +507,12 @@ export class SidebarCollector {
   readConversationsFromDb() {
     const db = new DatabaseSync(this.paths.conversationsDb, { open: true, readOnly: true });
     try {
+      const cols = new Set(
+        db.prepare('PRAGMA table_info(conversation_summaries)').all().map(c => c.name),
+      );
+      const userInputCol = cols.has('last_user_input_time') ? ', last_user_input_time' : '';
       const rows = db.prepare(`
-        SELECT conversation_id, title, status, project_id, workspace_uris, not_fully_idle, last_modified_time
+        SELECT conversation_id, title, status, project_id, workspace_uris, not_fully_idle, last_modified_time${userInputCol}
         FROM conversation_summaries
         WHERE nesting_depth = 0 AND killed = 0
         ORDER BY last_modified_time DESC

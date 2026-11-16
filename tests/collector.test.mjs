@@ -215,6 +215,15 @@ test('SidebarCollector reads SQLite conversation_summaries and excludes killed/n
     const { rows, archivedIds } = collector.readConversationsFromDb();
     assert.deepEqual(rows.map(r => r.conversation_id), ['top-1', 'arch-1']);
     assert.equal(archivedIds.has('arch-1'), true);
+
+    const db2 = new DatabaseSync(dbPath);
+    db2.exec('ALTER TABLE conversation_summaries ADD COLUMN last_user_input_time TEXT');
+    db2.exec("UPDATE conversation_summaries SET last_user_input_time = '2026-11-15 11:55:00+00:00' WHERE conversation_id = 'top-1'");
+    db2.close();
+    const res2 = collector.readConversationsFromDb();
+    const snap = buildSidebarSnapshot({ rows: res2.rows, archivedIds: res2.archivedIds });
+    const top1 = snap.conversations.find(c => c.id === 'top-1');
+    assert.ok(top1 && top1.userInputAtMs > 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
