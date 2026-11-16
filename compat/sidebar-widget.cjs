@@ -177,54 +177,97 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
     const clusters = [];
     for (const [reqKey, groupItems] of byReq.entries()) {
-      if (groupItems.length >= 2) {
-        const sorted = [...groupItems].sort(compareInternalRows);
-        let blockedCount = 0;
-        let runningCount = 0;
-        let unreadCount = 0;
-        let latestMs = 0;
-        let latestActiveMs = 0;
-        let bestLabel = sorted[0]?.reqLabel || reqKey;
+      if (!groupItems.length) continue;
+      const sorted = [...groupItems].sort(compareInternalRows);
+      let blockedCount = 0;
+      let runningCount = 0;
+      let unreadCount = 0;
+      let latestMs = 0;
+      let latestActiveMs = 0;
+      let bestLabel = sorted[0]?.reqLabel || reqKey;
 
-        for (const it of sorted) {
-          const sg = getStatusGroup(it);
-          const ms = it.updatedAtMs || 0;
-          if (sg === 'blocked') {
-            blockedCount += 1;
-            if (ms > latestActiveMs) latestActiveMs = ms;
-          } else if (sg === 'in_progress') {
-            runningCount += 1;
-            if (ms > latestActiveMs) latestActiveMs = ms;
-          } else if (it.isUnread) {
-            unreadCount += 1;
-          }
-          if (ms > latestMs) latestMs = ms;
-          if (it.reqLabel && it.reqLabel.length > bestLabel.length) bestLabel = it.reqLabel;
+      for (const it of sorted) {
+        const sg = getStatusGroup(it);
+        const ms = it.updatedAtMs || 0;
+        if (sg === 'blocked') {
+          blockedCount += 1;
+          if (ms > latestActiveMs) latestActiveMs = ms;
+        } else if (sg === 'in_progress') {
+          runningCount += 1;
+          if (ms > latestActiveMs) latestActiveMs = ms;
+        } else if (it.isUnread) {
+          unreadCount += 1;
         }
-
-        const highestStatus = blockedCount > 0
-          ? 'blocked'
-          : (runningCount > 0 ? 'in_progress' : 'idle');
-
-        clusters.push({
-          kind: 'group',
-          reqKey,
-          label: bestLabel,
-          items: sorted,
-          blockedCount,
-          runningCount,
-          unreadCount,
-          isUnread: unreadCount > 0,
-          highestStatus,
-          latestMs,
-          latestActiveMs: latestActiveMs || latestMs,
-        });
-      } else {
-        standaloneRows.push(groupItems[0]);
+        if (ms > latestMs) latestMs = ms;
+        if (it.reqLabel && it.reqLabel.length > bestLabel.length) bestLabel = it.reqLabel;
       }
+
+      const highestStatus = blockedCount > 0
+        ? 'blocked'
+        : (runningCount > 0 ? 'in_progress' : 'idle');
+
+      clusters.push({
+        kind: 'group',
+        reqKey,
+        label: bestLabel,
+        items: sorted,
+        blockedCount,
+        runningCount,
+        unreadCount,
+        isUnread: unreadCount > 0,
+        highestStatus,
+        latestMs,
+        latestActiveMs: latestActiveMs || latestMs,
+      });
     }
 
     return { clusters, standaloneRows };
+  }
+
+  function sortReqClusters(clusters) {
+    const rank = g => {
+      if (g.highestStatus === 'blocked') return 0;
+      if (g.highestStatus === 'in_progress') return 1;
+      return g.isUnread ? 2 : 3;
+    };
+    return [...clusters].sort((a, b) => {
+      const ra = rank(a);
+      const rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      if (ra <= 1) return (b.latestActiveMs || 0) - (a.latestActiveMs || 0);
+      return (b.latestMs || 0) - (a.latestMs || 0);
+    });
+  }
+
+  function makeReqClusterHeader(cluster, gPathKey, depth, isCollapsed, toggleKey) {
+    return {
+      type: 'header',
+      id: `header-agy-req:${gPathKey}`,
+      label: cluster.label,
+      count: cluster.items.length,
+      isCollapsed,
+      _agyKind: 'req-header',
+      _agyDepth: depth,
+      _agyToggleKey: toggleKey,
+      _agyRunning: cluster.runningCount + cluster.blockedCount,
+      _agyBlocked: cluster.blockedCount,
+      _agyUnread: cluster.unreadCount,
+      _agyTotal: cluster.items.length,
+      _agyLatestMs: cluster.latestMs,
+    };
+  }
+
+  function makePageShowMore(pageKey, remaining, depth, t, forceIndent = false) {
+    const indented = forceIndent || depth > 0;
+    const effectiveDepth = forceIndent ? Math.max(depth, 1) : depth;
+    return {
+      type: 'show-more',
+      id: `show-more-agy-page:${pageKey}`,
+      groupId: `agy-page:${pageKey}`,
+      isIndented: indented,
+      label: `${t.showMore} (${remaining})`,
+      _agyIndentPx: indented ? effectiveDepth * 14 : 0,
+    };
   }
 
   function emitClusterGroupItems(out, cluster, gPathKey, depth, bucketKey, opts) {
@@ -405,58 +448,59 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   function buildRequirementOnlyItems(convs, prefixPath, depth, opts) {
     const { collapsedSet, expandedLimits, t, isHistory } = opts;
     const { clusters, standaloneRows } = buildReqClusters(convs);
-
-    const entries = [
-      ...standaloneRows.map(c => ({
-        kind: 'single',
-        conv: c,
-        hasActive: isActiveConv(c),
-        isUnread: Boolean(c.isUnread),
-        latestMs: c.updatedAtMs || 0,
-        highestStatus: getStatusGroup(c),
-      })),
-      ...clusters.map(g => ({
-        ...g,
-        hasActive: g.highestStatus !== 'idle',
-      })),
-    ];
-
-    entries.sort((a, b) => {
-      if (a.hasActive !== b.hasActive) return a.hasActive ? -1 : 1;
-      if (Boolean(a.isUnread) !== Boolean(b.isUnread)) return a.isUnread ? -1 : 1;
-      return (b.latestMs || 0) - (a.latestMs || 0);
-    });
+    const sortedClusters = sortReqClusters(clusters);
 
     const pageKey = prefixPath || 'root:requirement';
-    const limit = !isHistory ? (expandedLimits[pageKey] || 60) : entries.length;
-    const visible = entries.slice(0, limit);
-    const singleGroupId = depth > 0 ? `agy-nested-d${Math.min(depth, 3)}:${pageKey}` : 'all';
+    const limit = !isHistory ? (expandedLimits[pageKey] || 40) : sortedClusters.length;
+    const visible = sortedClusters.slice(0, limit);
 
     const out = [];
-    for (const entry of visible) {
-      if (entry.kind === 'single') {
-        out.push({
-          type: 'row',
-          id: entry.conv.id,
-          cascadeId: entry.conv.id,
-          isIndented: depth > 0,
-          groupId: singleGroupId,
-        });
-      } else {
-        const gPathKey = prefixPath ? `${prefixPath}/req:${entry.reqKey}` : `req:${entry.reqKey}`;
-        emitClusterGroupItems(out, entry, gPathKey, depth, entry.highestStatus, opts);
-      }
+    for (const cluster of visible) {
+      const gPathKey = prefixPath ? `${prefixPath}/req:${cluster.reqKey}` : `req:${cluster.reqKey}`;
+      emitClusterGroupItems(out, cluster, gPathKey, depth, cluster.highestStatus, opts);
     }
 
-    if (entries.length > visible.length) {
+    if (sortedClusters.length > visible.length) {
+      out.push(makePageShowMore(pageKey, sortedClusters.length - visible.length, depth, t));
+    }
+
+    if (standaloneRows.length > 0) {
+      const inboxPathKey = prefixPath ? `${prefixPath}/req:INBOX` : 'req:INBOX';
+      const inboxToggleKey = `exp:${inboxPathKey}`;
+      const isInboxCollapsed = !collapsedSet.has(inboxToggleKey);
       out.push({
-        type: 'show-more',
-        id: `show-more-agy-page:${pageKey}`,
-        groupId: `agy-page:${pageKey}`,
-        isIndented: depth > 0,
-        label: `${t.showMore} (${entries.length - visible.length})`,
-        _agyIndentPx: depth > 0 ? depth * 14 : 0,
+        type: 'header',
+        id: `header-agy:${inboxPathKey}`,
+        label: t.standalone,
+        count: standaloneRows.length,
+        isCollapsed: isInboxCollapsed,
+        _agyKind: 'top-header',
+        _agyIconName: 'folder',
+        _agyDepth: depth,
+        _agyToggleKey: inboxToggleKey,
       });
+      if (!isInboxCollapsed) {
+        const sortedStandalone = [...standaloneRows].sort((a, b) => {
+          if (isActiveConv(a) !== isActiveConv(b)) return isActiveConv(a) ? -1 : 1;
+          if (Boolean(a.isUnread) !== Boolean(b.isUnread)) return a.isUnread ? -1 : 1;
+          return (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
+        });
+        const inboxLimit = !isHistory ? (expandedLimits[inboxPathKey] || 40) : sortedStandalone.length;
+        const visStandalone = sortedStandalone.slice(0, inboxLimit);
+        const childGroupId = `agy-nested-d${Math.min(Math.max(depth, 1), 3)}:${inboxPathKey}`;
+        for (const c of visStandalone) {
+          out.push({
+            type: 'row',
+            id: c.id,
+            cascadeId: c.id,
+            isIndented: true,
+            groupId: childGroupId,
+          });
+        }
+        if (sortedStandalone.length > visStandalone.length) {
+          out.push(makePageShowMore(inboxPathKey, sortedStandalone.length - visStandalone.length, depth, t, true));
+        }
+      }
     }
 
     return out;
@@ -592,7 +636,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       return out;
     }
 
-    if (dims.includes('status') && dims.includes('requirement')) {
+    const statusIdx = dims.indexOf('status');
+    const reqIdx = dims.indexOf('requirement');
+    if (statusIdx >= 0 && reqIdx >= 0 && statusIdx < reqIdx) {
       const outerDims = dims.filter(d => d !== 'status' && d !== 'requirement');
       if (outerDims.length === 0) {
         return buildStatusRequirementItems(convs, prefixPath, depth, opts);
@@ -627,6 +673,48 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     }
 
     const [headDim, ...restDims] = dims;
+    if (headDim === 'requirement') {
+      const { clusters, standaloneRows } = buildReqClusters(convs);
+      const sortedClusters = sortReqClusters(clusters);
+      const pageKey = prefixPath ? `${prefixPath}/req:groups` : 'root:requirement';
+      const limit = !isHistory ? (expandedLimits[pageKey] || 40) : sortedClusters.length;
+      const visible = sortedClusters.slice(0, limit);
+      const out = [];
+      for (const cluster of visible) {
+        const gPathKey = prefixPath ? `${prefixPath}/req:${cluster.reqKey}` : `req:${cluster.reqKey}`;
+        const defaultCollapsed = cluster.highestStatus === 'idle';
+        const toggleKey = defaultCollapsed ? `exp:${gPathKey}` : `col:${gPathKey}`;
+        const isCollapsed = defaultCollapsed ? !collapsedSet.has(toggleKey) : collapsedSet.has(toggleKey);
+        out.push(makeReqClusterHeader(cluster, gPathKey, depth, isCollapsed, toggleKey));
+        if (!isCollapsed) {
+          out.push(...emitGenericDims(cluster.items, restDims, gPathKey, depth + 1, opts));
+        }
+      }
+      if (sortedClusters.length > visible.length) {
+        out.push(makePageShowMore(pageKey, sortedClusters.length - visible.length, depth, t));
+      }
+      if (standaloneRows.length > 0) {
+        const inboxPathKey = prefixPath ? `${prefixPath}/req:INBOX` : 'req:INBOX';
+        const inboxToggleKey = `exp:${inboxPathKey}`;
+        const isInboxCollapsed = !collapsedSet.has(inboxToggleKey);
+        out.push({
+          type: 'header',
+          id: `header-agy:${inboxPathKey}`,
+          label: t.standalone,
+          count: standaloneRows.length,
+          isCollapsed: isInboxCollapsed,
+          _agyKind: 'top-header',
+          _agyIconName: 'folder',
+          _agyDepth: depth,
+          _agyToggleKey: inboxToggleKey,
+        });
+        if (!isInboxCollapsed) {
+          out.push(...emitGenericDims(standaloneRows, restDims, inboxPathKey, depth + 1, opts));
+        }
+      }
+      return out;
+    }
+
     const buckets = partitionByDimension(convs, headDim, t);
     const out = [];
     for (const b of buckets) {
@@ -931,6 +1019,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     expandedReadIdleGroups: new Set(),
     localViewedMs: new Map(),
     refreshTick: 0,
+    prefsSeq: 0,
     triggerRefresh: null,
   };
 
@@ -1000,12 +1089,14 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   async function updatePrefs(patch) {
+    state.prefsSeq += 1;
+    const seq = state.prefsSeq;
     state.prefs = { ...state.prefs, ...patch };
     syncOfficialMenus();
     requestReactRefresh();
     try {
       const saved = await window.__agyProjectSidebarHost?.setPreferences?.(patch);
-      if (saved && typeof saved === 'object' && !saved.offline) {
+      if (state.prefsSeq === seq && saved && typeof saved === 'object' && !saved.offline) {
         state.prefs = { ...state.prefs, ...saved };
         syncOfficialMenus();
         requestReactRefresh();
@@ -1305,7 +1396,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     const bgCls = isBg ? 'bg-background' : 'bg-sidebar';
 
     if (item._agyKind === 'req-header') {
-      const padLeft = 4 + Math.min(item._agyDepth || 1, 4) * 14;
+      const padLeft = 4 + Math.min(item._agyDepth ?? 1, 4) * 14;
       let rightEl = null;
       if (item._agyRunning > 0) {
         const countText = item._agyRunning < item._agyTotal
@@ -1581,11 +1672,14 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   async function pollTree(force = false) {
     if (polling) return;
     polling = true;
+    const seqAtStart = state.prefsSeq;
     try {
       const res = await window.__agyProjectSidebarHost?.getTree?.({ force });
       if (res && !res.offline) {
         state.tree = res;
-        if (res.preferences) state.prefs = { ...state.prefs, ...res.preferences };
+        if (state.prefsSeq === seqAtStart && res.preferences) {
+          state.prefs = { ...state.prefs, ...res.preferences };
+        }
         ensureNativeListPatched();
         syncOfficialMenus();
         requestReactRefresh();

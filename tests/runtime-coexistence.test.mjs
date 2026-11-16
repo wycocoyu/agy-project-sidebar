@@ -140,7 +140,7 @@ test('RuntimeUi handles attach, tree RPC, and detach without errors', async () =
   }
 });
 
-test('Status + Requirement builds native items without Standalone, pins unread first, and folds read idle in active groups (Plan A)', () => {
+test('Requirement, Status + Requirement, and Requirement + Status produce distinct native layouts with single-session req groups and Plan A folding', () => {
   const widgetModule = require('../compat/sidebar-widget.cjs');
   const { buildVirtualItemsForDims } = widgetModule({ __unitTestOnly: true });
 
@@ -156,7 +156,7 @@ test('Status + Requirement builds native items without Standalone, pins unread f
     { id: 'r12-old1', title: '1114 | 调研 | #12 历史压测日志', projectKey: 'p-ord', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 2 * hour },
     { id: 'r12-old2', title: '1113 | 分析 | #12 初版设计草稿', projectKey: 'p-ord', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 1 * day },
 
-    // Unread singleton with #3 in p-loop & unread singleton untagged
+    // Single-session unread #3 (now keeps its Requirement group!) + untagged unread s-unr-plain
     { id: 's-unr-tag', title: '1115 | 设计 | #3 LoopForge支持CNB方案', projectKey: 'p-loop', statusGroup: 'idle', isUnread: true, updatedAtMs: now - 10 * min },
     { id: 's-unr-plain', title: '1115 | 功能 | REA逆向Todos复刻流水线', projectKey: 'p-agent', statusGroup: 'idle', isUnread: true, updatedAtMs: now - 15 * min },
 
@@ -164,24 +164,19 @@ test('Status + Requirement builds native items without Standalone, pins unread f
     { id: 'm770-unr', title: '1115 | 分析 | MUL-770 DA上云方案', projectKey: 'p-ark', statusGroup: 'idle', isUnread: true, updatedAtMs: now - 20 * min },
     { id: 'm770-read', title: '1114 | 调研 | MUL-770 旧日志', projectKey: 'p-ark', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 1 * day },
 
-    // Freshly finished read idle singletons (tagged & untagged) -> MUST sit above old multi-session groups!
+    // Freshly finished read idle untagged (s-now) + single-session tagged #2814
     { id: 's-now', title: '1115 | 功能 | 拆分agy-project-sidebar插件', projectKey: 'p-coco', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 500 },
     { id: 's-2814', title: '1115 | 调试 | #2814 OpenCLI reply多图排查', projectKey: 'p-coco', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 2 * hour },
 
-    // All-read historical multi-session Q180 (count = 2) -> collapsed by default, sorted below s-2814
+    // All-read historical multi-session Q180 (count = 2) -> collapsed by default, sorted below #2814
     { id: 'q180-1', title: '1113 | 分析 | Q180 需求研读', projectKey: 'p-egg', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 1 * day },
     { id: 'q180-2', title: '1108 | 分析 | Q180 早期调研', projectKey: 'p-egg', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 6 * day },
   ];
 
-  // Both dim orderings produce identical Status-skeleton layout
+  // 1) Status + Requirement: status skeleton + unwrapped untagged rows + requirement groups (including count === 1)
   const itemsSR = buildVirtualItemsForDims(sampleConvs, ['status', 'requirement']);
-  const itemsRS = buildVirtualItemsForDims(sampleConvs, ['requirement', 'status']);
-  assert.deepEqual(itemsSR.map(x => x.id), itemsRS.map(x => x.id));
-
-  // Zero Standalone headers anywhere
   assert.equal(itemsSR.some(x => x.type === 'header' && /Standalone/i.test(x.label)), false);
 
-  // In Progress section: #12 shows only running + unread rows + Plan A progressive fold toggle (NOT read-idle rows)
   const progIdx = itemsSR.findIndex(x => x.id === 'header-status-in-progress');
   const idleIdx = itemsSR.findIndex(x => x.id === 'header-status-idle');
   assert.ok(progIdx >= 0 && idleIdx > progIdx);
@@ -202,20 +197,55 @@ test('Status + Requirement builds native items without Standalone, pins unread f
   assert.ok(expandedItems.some(x => x.type === 'row' && x.cascadeId === 'r12-old2'));
   assert.ok(expandedItems.some(x => x.type === 'show-more' && x.label.includes('收起')));
 
-  // Idle section: unread singletons + unread group come first, followed by fresh singletons (s-now, s-2814), BEFORE collapsed Q180
+  // Idle section: collapsed req headers (#3, MUL-770, #2814, Q180) interleave with unwrapped untagged rows (s-unr-plain, s-now) in isUnread -> latestMs order
   const idleSlice = itemsSR.slice(idleIdx + 1);
-  const pos = id => idleSlice.findIndex(x => x.id === id);
-  assert.ok(pos('s-unr-tag') >= 0 && pos('s-unr-tag') < pos('s-now'));
-  assert.ok(pos('s-unr-plain') >= 0 && pos('s-unr-plain') < pos('s-now'));
-  const m770Hdr = idleSlice.find(x => x.type === 'header' && x.label.includes('MUL-770'));
-  assert.ok(m770Hdr && m770Hdr._agyUnread === 1 && m770Hdr.isCollapsed === true);
-  assert.ok(idleSlice.indexOf(m770Hdr) < pos('s-now'));
+  const idxOfHeader = frag => idleSlice.findIndex(x => x.type === 'header' && x.label.includes(frag));
+  const idxOfRow = id => idleSlice.findIndex(x => x.type === 'row' && x.id === id);
 
-  const q180Hdr = idleSlice.find(x => x.type === 'header' && x.label.includes('Q180'));
-  assert.ok(q180Hdr && q180Hdr.isCollapsed === true);
-  assert.ok(pos('s-now') < pos('s-2814'));
-  assert.ok(pos('s-2814') < idleSlice.indexOf(q180Hdr));
-  // Unwrapped singletons: #2814 & #3 must NOT have headers
-  assert.equal(idleSlice.some(x => x.type === 'header' && x.label.includes('2814')), false);
-  assert.equal(idleSlice.some(x => x.type === 'header' && x.label.includes('#3')), false);
+  const sr3Idx = idxOfHeader('#3');
+  const srUnrPlainIdx = idxOfRow('s-unr-plain');
+  const srM770Idx = idxOfHeader('MUL-770');
+  const srNowIdx = idxOfRow('s-now');
+  const sr2814Idx = idxOfHeader('2814');
+  const srQ180Idx = idxOfHeader('Q180');
+
+  assert.ok(sr3Idx >= 0 && idleSlice[sr3Idx].isCollapsed === true && idleSlice[sr3Idx].count === 1);
+  assert.ok(srM770Idx >= 0 && idleSlice[srM770Idx].isCollapsed === true && idleSlice[srM770Idx]._agyUnread === 1);
+  assert.ok(sr2814Idx >= 0 && idleSlice[sr2814Idx].isCollapsed === true && idleSlice[sr2814Idx].count === 1);
+  assert.ok(srQ180Idx >= 0 && idleSlice[srQ180Idx].isCollapsed === true && idleSlice[srQ180Idx].count === 2);
+  assert.ok(sr3Idx < srUnrPlainIdx && srUnrPlainIdx < srM770Idx && srM770Idx < srNowIdx);
+  assert.ok(srNowIdx < sr2814Idx && sr2814Idx < srQ180Idx);
+
+  // 2) Requirement only: NO top status headers; top-level req headers on top + collapsed Standalone at bottom for untagged inbox
+  const itemsR = buildVirtualItemsForDims(sampleConvs, ['requirement']);
+  assert.equal(itemsR.some(x => x.id === 'header-status-in-progress' || x.id === 'header-status-idle'), false);
+  const r12Hdr = itemsR.find(x => x._agyKind === 'req-header' && x.label.includes('#12'));
+  const r3Hdr = itemsR.find(x => x._agyKind === 'req-header' && x.label.includes('#3'));
+  const r2814Hdr = itemsR.find(x => x._agyKind === 'req-header' && x.label.includes('2814'));
+  const rStandaloneHdr = itemsR[itemsR.length - 1];
+
+  assert.ok(r12Hdr && r12Hdr._agyDepth === 0 && r12Hdr.isCollapsed === false);
+  assert.ok(r3Hdr && r3Hdr._agyDepth === 0 && r3Hdr.isCollapsed === true);
+  assert.ok(r2814Hdr && r2814Hdr._agyDepth === 0 && r2814Hdr.isCollapsed === true);
+  assert.ok(rStandaloneHdr && rStandaloneHdr.label === 'Standalone' && rStandaloneHdr.count === 2 && rStandaloneHdr.isCollapsed === true);
+  assert.equal(itemsR.some(x => x.type === 'row' && (x.id === 's-unr-plain' || x.id === 's-now')), false);
+
+  const itemsRExp = buildVirtualItemsForDims(sampleConvs, ['requirement'], {
+    collapsedKeys: ['exp:req:INBOX'],
+  });
+  assert.ok(itemsRExp.some(x => x.type === 'row' && x.id === 's-unr-plain'));
+  assert.ok(itemsRExp.some(x => x.type === 'row' && x.id === 's-now'));
+
+  // 3) Requirement + Status: Requirement outer skeleton with nested Status headers inside expanded Requirements
+  const itemsRS = buildVirtualItemsForDims(sampleConvs, ['requirement', 'status']);
+  assert.notDeepEqual(itemsRS.map(x => x.id), itemsSR.map(x => x.id));
+  const rs12Idx = itemsRS.findIndex(x => x._agyKind === 'req-header' && x.label.includes('#12'));
+  const rs3Idx = itemsRS.findIndex(x => x._agyKind === 'req-header' && x.label.includes('#3'));
+  assert.ok(rs12Idx === 0 && rs3Idx > rs12Idx);
+  const rs12Inner = itemsRS.slice(rs12Idx + 1, rs3Idx);
+  const innerProg = rs12Inner.find(x => x._agyKind === 'top-header' && x.label === 'In Progress');
+  const innerIdle = rs12Inner.find(x => x._agyKind === 'top-header' && x.label === 'Idle');
+  assert.ok(innerProg && innerProg._agyDepth === 1 && innerProg.count === 1);
+  assert.ok(innerIdle && innerIdle._agyDepth === 1 && innerIdle.count === 3);
+  assert.equal(itemsRS[itemsRS.length - 1].label, 'Standalone');
 });
