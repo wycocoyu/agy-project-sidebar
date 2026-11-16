@@ -409,6 +409,278 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     }
   }
 
+  const EPS_MS = 1000;
+
+  function classifyInboxConversation(conv, inboxPrefs, nowMs = Date.now()) {
+    if (!conv || !inboxPrefs || inboxPrefs.enabled === false || conv.isArchived) {
+      return { bucket: 'idle', reason: 'disabled', anchorMs: Number(conv?.updatedAtMs || 0) };
+    }
+    if (getStatusGroup(conv) !== 'idle') {
+      return { bucket: 'active', reason: 'active', anchorMs: Number(conv.updatedAtMs || 0) };
+    }
+
+    const id = conv.id;
+    const updatedAtMs = Number(conv.updatedAtMs || 0);
+    const userInputAtMs = Number(conv.userInputAtMs || 0);
+    const enabledAtMs = Number(inboxPrefs.enabledAtMs || 0);
+    const retireHours = Math.max(1, Number(inboxPrefs.autoRetireHours || 24));
+    const retireWindowMs = retireHours * 3600000;
+
+    const rawSettled = inboxPrefs.settled?.[id];
+    const settledValid = Boolean(
+      rawSettled
+      && Number(rawSettled.atMs) > 0
+      && !(updatedAtMs > Number(rawSettled.updatedMs || 0) + EPS_MS)
+    );
+
+    const rawFollowAtMs = Number(inboxPrefs.followUp?.[id] || 0);
+    const followNewTurn = rawFollowAtMs > 0
+      && userInputAtMs > rawFollowAtMs + EPS_MS
+      && updatedAtMs > userInputAtMs + EPS_MS;
+    const followValid = rawFollowAtMs > 0 && !followNewTurn;
+
+    const rawSnooze = inboxPrefs.snoozed?.[id];
+    const snoozeBaseUpdated = Number(rawSnooze?.updatedMs || 0);
+    const snoozeValid = Boolean(
+      rawSnooze
+      && Number(rawSnooze.untilMs) > 0
+      && Number(rawSnooze.setAtMs) > 0
+      && !(updatedAtMs > snoozeBaseUpdated + EPS_MS)
+      && !(userInputAtMs > Number(rawSnooze.setAtMs) + EPS_MS)
+    );
+
+    let winner = null;
+    let bestAt = -1;
+    if (settledValid && Number(rawSettled.atMs) > bestAt) {
+      bestAt = Number(rawSettled.atMs);
+      winner = 'settled';
+    }
+    if (followValid && rawFollowAtMs > bestAt) {
+      bestAt = rawFollowAtMs;
+      winner = 'followUp';
+    }
+    if (snoozeValid && Number(rawSnooze.setAtMs) > bestAt) {
+      bestAt = Number(rawSnooze.setAtMs);
+      winner = 'snooze';
+    }
+
+    if (winner === 'followUp') {
+      return {
+        bucket: 'inbox',
+        isFollowUp: true,
+        followUpAtMs: rawFollowAtMs,
+        anchorMs: Math.max(rawFollowAtMs, updatedAtMs),
+        reason: 'follow_up',
+      };
+    }
+
+    if (winner === 'snooze') {
+      const untilMs = Number(rawSnooze.untilMs);
+      if (nowMs < untilMs) {
+        return {
+          bucket: 'snoozed',
+          isSnoozed: true,
+          snoozedUntilMs: untilMs,
+          anchorMs: untilMs,
+          reason: 'snoozed',
+        };
+      }
+      const wokeAnchorMs = Math.max(updatedAtMs, untilMs);
+      if (conv.markedAsUnread || nowMs - wokeAnchorMs <= retireWindowMs) {
+        return {
+          bucket: 'inbox',
+          isWoke: true,
+          wokeAtMs: untilMs,
+          anchorMs: wokeAnchorMs,
+          reason: 'woke',
+        };
+      }
+      return {
+        bucket: 'idle',
+        isAutoRetired: true,
+        anchorMs: wokeAnchorMs,
+        reason: 'woke_retired',
+      };
+    }
+
+    if (winner === 'settled') {
+      if (conv.markedAsUnread && rawSettled.settledMarkedUnread !== true) {
+        return {
+          bucket: 'inbox',
+          isManualUnread: true,
+          anchorMs: Math.max(updatedAtMs, nowMs),
+          reason: 'marked_unread',
+        };
+      }
+      return {
+        bucket: 'idle',
+        isSettled: true,
+        settledAtMs: Number(rawSettled.atMs),
+        anchorMs: updatedAtMs,
+        reason: 'settled',
+      };
+    }
+
+    if (conv.markedAsUnread) {
+      return {
+        bucket: 'inbox',
+        isManualUnread: true,
+        anchorMs: Math.max(updatedAtMs, enabledAtMs || 0),
+        reason: 'marked_unread',
+      };
+    }
+
+    if (enabledAtMs > 0 && updatedAtMs >= enabledAtMs - EPS_MS) {
+      if (nowMs - updatedAtMs <= retireWindowMs) {
+        return {
+          bucket: 'inbox',
+          anchorMs: updatedAtMs,
+          reason: 'new_idle',
+        };
+      }
+      return {
+        bucket: 'idle',
+        isAutoRetired: true,
+        anchorMs: updatedAtMs,
+        reason: 'auto_retired',
+      };
+    }
+
+    return {
+      bucket: 'idle',
+      anchorMs: updatedAtMs,
+      reason: 'historical',
+    };
+  }
+
+  function partitionInboxBuckets(convs, inboxPrefs, nowMs = Date.now()) {
+    const inboxEntries = [];
+    const snoozedEntries = [];
+    const remainingConvs = [];
+    const metaById = new Map();
+
+    for (const c of convs || []) {
+      const cls = classifyInboxConversation(c, inboxPrefs, nowMs);
+      metaById.set(c.id, cls);
+      if (cls.bucket === 'inbox') {
+        inboxEntries.push({ conv: c, cls });
+      } else if (cls.bucket === 'snoozed') {
+        snoozedEntries.push({ conv: c, cls });
+      } else {
+        remainingConvs.push(c);
+      }
+    }
+
+    const inboxRank = entry => {
+      if (entry.conv.isUnread || entry.cls.isWoke || entry.cls.isManualUnread) return 0;
+      if (entry.cls.isFollowUp) return 1;
+      return 2;
+    };
+
+    inboxEntries.sort((a, b) => {
+      const ra = inboxRank(a);
+      const rb = inboxRank(b);
+      if (ra !== rb) return ra - rb;
+      return (b.cls.anchorMs || b.conv.updatedAtMs || 0) - (a.cls.anchorMs || a.conv.updatedAtMs || 0);
+    });
+
+    snoozedEntries.sort((a, b) => (a.cls.snoozedUntilMs || 0) - (b.cls.snoozedUntilMs || 0));
+
+    return { inboxEntries, snoozedEntries, remainingConvs, metaById };
+  }
+
+  function buildInboxSectionItems(inboxEntries, snoozedEntries, opts) {
+    const { collapsedSet, expandedLimits, t, isHistory } = opts;
+    const out = [];
+
+    const inboxToggleKey = 'col:inbox';
+    const isInboxCollapsed = collapsedSet.has(inboxToggleKey);
+    const inboxUnreadCount = inboxEntries.filter(e => Boolean(e.conv.isUnread) || Boolean(e.cls.isWoke) || Boolean(e.cls.isManualUnread)).length;
+
+    out.push({
+      type: 'header',
+      id: 'header-inbox',
+      label: t.inboxTitle || 'Inbox',
+      count: inboxEntries.length,
+      isCollapsed: inboxEntries.length === 0 ? true : isInboxCollapsed,
+      _agyKind: 'top-header',
+      _agyIconName: 'inbox',
+      _agyInboxKind: 'inbox',
+      _agyDepth: 0,
+      _agyToggleKey: inboxToggleKey,
+      _agyUnread: inboxUnreadCount,
+    });
+
+    if (!isInboxCollapsed && inboxEntries.length > 0) {
+      const pageKey = 'inbox:list';
+      const limit = !isHistory ? (expandedLimits[pageKey] || 40) : inboxEntries.length;
+      const visible = inboxEntries.slice(0, limit);
+      for (const e of visible) {
+        out.push({
+          type: 'row',
+          id: e.conv.id,
+          cascadeId: e.conv.id,
+          isIndented: true,
+          groupId: 'inbox',
+        });
+      }
+      if (inboxEntries.length > visible.length) {
+        out.push({
+          type: 'show-more',
+          id: 'show-more-agy-page:inbox:list',
+          groupId: 'agy-page:inbox:list',
+          isIndented: false,
+          label: `${t.showMore || 'Show more'} (${inboxEntries.length - visible.length})`,
+          _agyIndentPx: 0,
+        });
+      }
+    }
+
+    if (snoozedEntries.length > 0) {
+      const snoozeToggleKey = 'exp:inbox:snoozed';
+      const isSnoozeCollapsed = !collapsedSet.has(snoozeToggleKey);
+      out.push({
+        type: 'header',
+        id: 'header-inbox-snoozed',
+        label: t.snoozedTitle || 'Snoozed',
+        count: snoozedEntries.length,
+        isCollapsed: isSnoozeCollapsed,
+        _agyKind: 'top-header',
+        _agyIconName: 'snooze',
+        _agyInboxKind: 'snoozed',
+        _agyDepth: 0,
+        _agyToggleKey: snoozeToggleKey,
+      });
+
+      if (!isSnoozeCollapsed) {
+        const sPageKey = 'inbox:snoozed';
+        const sLimit = !isHistory ? (expandedLimits[sPageKey] || 40) : snoozedEntries.length;
+        const sVisible = snoozedEntries.slice(0, sLimit);
+        for (const e of sVisible) {
+          out.push({
+            type: 'row',
+            id: e.conv.id,
+            cascadeId: e.conv.id,
+            isIndented: true,
+            groupId: 'inbox-snoozed',
+          });
+        }
+        if (snoozedEntries.length > sVisible.length) {
+          out.push({
+            type: 'show-more',
+            id: 'show-more-agy-page:inbox:snoozed',
+            groupId: 'agy-page:inbox:snoozed',
+            isIndented: false,
+            label: `${t.showMore || 'Show more'} (${snoozedEntries.length - sVisible.length})`,
+            _agyIndentPx: 0,
+          });
+        }
+      }
+    }
+
+    return out;
+  }
+
   function buildStatusRequirementItems(convs, prefixPath, depth, opts) {
     const { collapsedSet, expandedLimits, t, isHistory } = opts;
     const { clusters, standaloneRows } = buildReqClusters(convs);
@@ -447,7 +719,15 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     });
 
     const out = [];
+    const inboxInsert = depth === 0 && Array.isArray(opts._inboxItemsBeforeIdle) && opts._inboxItemsBeforeIdle.length > 0
+      ? opts._inboxItemsBeforeIdle
+      : null;
+    let inboxSpliced = false;
     for (const bKey of ['blocked', 'in_progress', 'idle']) {
+      if (bKey === 'idle' && inboxInsert && !inboxSpliced) {
+        out.push(...inboxInsert);
+        inboxSpliced = true;
+      }
       const bucket = buckets[bKey];
       if (!bucket.entries.length) continue;
 
@@ -507,6 +787,10 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
           _agyIndentPx: depth > 0 ? depth * 14 : 0,
         });
       }
+    }
+
+    if (inboxInsert && !inboxSpliced) {
+      out.push(...inboxInsert);
     }
 
     return out;
@@ -772,7 +1056,15 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
     const buckets = partitionByDimension(convs, headDim, t);
     const out = [];
+    const inboxInsert = depth === 0 && headDim === 'status' && Array.isArray(opts._inboxItemsBeforeIdle) && opts._inboxItemsBeforeIdle.length > 0
+      ? opts._inboxItemsBeforeIdle
+      : null;
+    let inboxSpliced = false;
     for (const b of buckets) {
+      if (inboxInsert && !inboxSpliced && b.key === 'status:idle') {
+        out.push(...inboxInsert);
+        inboxSpliced = true;
+      }
       const pathKey = prefixPath ? `${prefixPath}/${b.key}` : b.key;
       const toggleKey = `col:${pathKey}`;
       const isCollapsed = collapsedSet.has(toggleKey);
@@ -789,7 +1081,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       });
       if (isCollapsed) continue;
       if (restDims.length > 0) {
-        out.push(...emitGenericDims(b.items, restDims, pathKey, depth + 1, opts));
+        out.push(...emitGenericDims(b.items, restDims, pathKey, depth + 1, { ...opts, _inboxItemsBeforeIdle: null }));
       } else {
         const sorted = [...b.items].sort((a, b2) => {
           if (Boolean(a.isUnread) !== Boolean(b2.isUnread)) return a.isUnread ? -1 : 1;
@@ -819,6 +1111,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         }
       }
     }
+    if (inboxInsert && !inboxSpliced) {
+      out.push(...inboxInsert);
+    }
     return out;
   }
 
@@ -827,6 +1122,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       statusBlocked: 'Blocked',
       statusInProgress: 'In Progress',
       statusIdle: 'Idle',
+      inboxTitle: 'Inbox',
+      snoozedTitle: 'Snoozed',
       envLocal: 'This Computer',
       envCloud: 'Remote',
       standalone: 'Standalone',
@@ -835,14 +1132,61 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       collapseReadIdle: '▾ 收起 {n} 条已读空闲会话',
     };
     const scoped = assignRequirements(convs || []);
-    return emitGenericDims(scoped, dims || [], '', 0, {
-      collapsedSet: opts.collapsedSet instanceof Set ? opts.collapsedSet : new Set(opts.collapsedKeys || []),
-      expandedReadIdleGroups: opts.expandedReadIdleGroups instanceof Set ? opts.expandedReadIdleGroups : new Set(opts.expandedReadIdleKeys || []),
-      expandedLimits: opts.expandedLimits || {},
-      activeChatId: opts.activeChatId || null,
-      isHistory: Boolean(opts.isHistory),
+    const collapsedSet = opts.collapsedSet instanceof Set ? opts.collapsedSet : new Set(opts.collapsedKeys || []);
+    const expandedReadIdleGroups = opts.expandedReadIdleGroups instanceof Set ? opts.expandedReadIdleGroups : new Set(opts.expandedReadIdleKeys || []);
+    const expandedLimits = opts.expandedLimits || {};
+    const activeChatId = opts.activeChatId || null;
+    const isHistory = Boolean(opts.isHistory);
+    const dimList = dims || [];
+
+    const inboxPrefs = opts.inbox && opts.inbox.enabled !== false && !isHistory ? opts.inbox : null;
+    if (!inboxPrefs) {
+      return emitGenericDims(scoped, dimList, '', 0, {
+        collapsedSet,
+        expandedReadIdleGroups,
+        expandedLimits,
+        activeChatId,
+        isHistory,
+        t,
+      });
+    }
+
+    const nowMs = Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now();
+    const { inboxEntries, snoozedEntries, remainingConvs, metaById } = partitionInboxBuckets(scoped, inboxPrefs, nowMs);
+    if (opts.outMetaById instanceof Map) {
+      for (const [k, v] of metaById.entries()) opts.outMetaById.set(k, v);
+    }
+
+    const inboxItems = buildInboxSectionItems(inboxEntries, snoozedEntries, {
+      collapsedSet,
+      expandedLimits,
       t,
+      isHistory,
     });
+
+    if (dimList[0] === 'status') {
+      return emitGenericDims(remainingConvs, dimList, '', 0, {
+        collapsedSet,
+        expandedReadIdleGroups,
+        expandedLimits,
+        activeChatId,
+        isHistory,
+        t,
+        _inboxItemsBeforeIdle: inboxItems,
+      });
+    }
+
+    return [
+      ...inboxItems,
+      ...emitGenericDims(remainingConvs, dimList, '', 0, {
+        collapsedSet,
+        expandedReadIdleGroups,
+        expandedLimits,
+        activeChatId,
+        isHistory,
+        t,
+      }),
+    ];
   }
 
   if (testEnv && testEnv.__unitTestOnly) {
@@ -852,6 +1196,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       assignRequirements,
       partitionByDimension,
       buildNestedTree,
+      classifyInboxConversation,
+      partitionInboxBuckets,
       buildVirtualItemsForDims,
     };
   }
@@ -877,7 +1223,17 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     account_tree: 'M280-120q-33 0-56.5-23.5T200-200q0-23 12-41.5t32-28.5v-420q-20-10-32-28.5T200-760q0-33 23.5-56.5T280-840q33 0 56.5 23.5T360-760q0 23-12 41.5T316-690v210h244q17 0 28.5-11.5T600-520v-170q-20-10-32-28.5T556-760q0-33 23.5-56.5T636-840q33 0 56.5 23.5T716-760q0 23-12 41.5T672-690v170q0 50-35 85t-85 35H316v130q20 10 32 28.5T360-200q0 33-23.5 56.5T280-120Z',
     computer: 'M160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h640q33 0 56.5 23.5T880-720v480q0 33-23.5 56.5T800-160H160Zm0-80h640v-480H160v480Z',
     cloud: 'M260-160q-91 0-155.5-63T40-377q0-78 47-139t123-78q25-92 100-149t170-57q117 0 198.5 81.5T760-520q69 8 114.5 59.5T920-340q0 75-52.5 127.5T740-160H260Zm0-80h480q42 0 71-29t29-71q0-42-29-71t-71-29h-60v-80q0-83-58.5-141.5T480-720q-83 0-141.5 58.5T280-520h-20q-58 0-99 41t-41 99q0 58 41 99t99 41Z',
+    inbox: 'M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-120H640q-30 38-71.5 59T480-240q-47 0-88.5-21T320-320H200v120Zm280-120q38 0 69-22t43-58h168v-360H200v360h168q12 36 43 58t69 22ZM200-200h560-560Z',
+    snooze: 'M480-80q-75 0-140.5-28.5t-114-77q-48.5-48.5-77-114T120-440q0-75 28.5-140.5t77-114q48.5-48.5 114-77T480-880q75 0 140.5 28.5t114 77q48.5 48.5 77 114T840-440q0 75-28.5 140.5t-77 114q-48.5 48.5-114 77T480-80Zm0-80q116 0 198-82t82-198q0-116-82-198t-198-82q-116 0-198 82t-82 198q0 116 82 198t198 82Zm116-148 56-56-132-132v-184h-80v216l156 156ZM224-854l56 56-170 170-56-56 170-170Zm512 0 170 170-56 56-170-170 56-56Z',
+    check: 'M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z',
+    push_pin: 'm640-480 80 80v80H520v240l-40 40-40-40v-240H240v-80l80-80v-280h-40v-80h400v80h-40v280Zm-286 0h252l-46-46v-314H400v314l-46 46Zm126 0Z',
+    wake: 'M380-240 240-380l56-56 84 84 224-224 56 56-280 280ZM480-80q-75 0-140.5-28.5t-114-77q-48.5-48.5-77-114T120-440q0-75 28.5-140.5t77-114q48.5-48.5 114-77T480-880q75 0 140.5 28.5t114 77q48.5 48.5 77 114T840-440q0 75-28.5 140.5t-77 114q-48.5 48.5-114 77T480-80Zm0-80q116 0 198-82t82-198q0-116-82-198t-198-82q-116 0-198 82t-82 198q0 116 82 198t198 82ZM224-854l56 56-170 170-56-56 170-170Zm512 0 170 170-56 56-170-170 56-56Z',
   };
+
+  const MENU_INBOX_TOGGLE_ID = 'agy-menu-inbox-toggle';
+  const MENU_INBOX_RETIRE_ID = 'agy-menu-inbox-retire';
+  const SNOOZE_POPOVER_ID = 'agy-inbox-snooze-popover';
+  const INBOX_TOAST_ID = 'agy-inbox-toast';
 
   const getI18n = lang => {
     const raw = typeof window.__agyProjectSidebarI18nFactory === 'function'
@@ -897,6 +1253,24 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       statusBlocked: raw.statusBlocked || 'Blocked',
       statusInProgress: raw.statusInProgress || 'In Progress',
       statusIdle: raw.statusIdle || 'Idle',
+      inboxTitle: raw.inboxTitle || '收件箱',
+      snoozedTitle: raw.snoozedTitle || '延后',
+      actionSettle: raw.actionSettle || '已完成',
+      actionFollowUp: raw.actionFollowUp || '待续保留',
+      actionUnfollowUp: raw.actionUnfollowUp || '取消待续',
+      actionSnooze: raw.actionSnooze || '延后',
+      actionWake: raw.actionWake || '立即唤醒',
+      actionKeepInbox: raw.actionKeepInbox || '加入收件箱',
+      snooze2h: raw.snooze2h || '2 小时后',
+      snoozeTomorrow: raw.snoozeTomorrow || '明早 09:00',
+      snooze3d: raw.snooze3d || '3 天后',
+      undo: raw.undo || '撤销',
+      toastSettled: raw.toastSettled || '已移至 Idle',
+      toastSnoozed: raw.toastSnoozed || '已延后至 {time}',
+      toastFollowUp: raw.toastFollowUp || '已锁定在收件箱',
+      menuInboxTriage: raw.menuInboxTriage || '收件箱工作流',
+      menuAutoRetire: raw.menuAutoRetire || '自动退场时限',
+      retire168h: raw.retire168h || '7 天',
       envLocal: raw.envLocal || 'This Computer',
       envCloud: raw.envCloud || 'Remote',
       showMore: raw.showMore || 'Show more',
@@ -1026,6 +1400,146 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   background: #3b82f6;
   flex-shrink: 0;
 }
+.agy-inbox-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.agy-inbox-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground, #71717a);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.agy-inbox-btn:hover {
+  background: var(--secondary, rgba(10,10,12,0.08));
+  color: var(--foreground, #18181b);
+}
+.agy-inbox-btn[data-agy-active="true"] {
+  color: #2563eb;
+}
+.agy-inbox-btn[data-agy-action="settle"]:hover {
+  color: #16a34a;
+}
+.agy-inbox-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  line-height: 1.1;
+  color: var(--muted-foreground, #71717a);
+  background: var(--row-bg, var(--sidebar, #ffffff));
+  padding: 1px 5px;
+  border-radius: 5px;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  z-index: 2;
+}
+.agy-inbox-badge[data-agy-kind="followup"] {
+  color: #2563eb;
+}
+.agy-inbox-badge[data-agy-kind="woke"] {
+  color: #d97706;
+}
+[data-testid="conversation-row-sidebar"]:hover .agy-inbox-badge,
+[data-testid="conversation-row-sidebar"]:has(:focus-visible) .agy-inbox-badge {
+  opacity: 0;
+}
+#${SNOOZE_POPOVER_ID} {
+  position: fixed;
+  z-index: 99999;
+  min-width: 176px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  background: var(--card, #ffffff);
+  color: var(--foreground, #18181b);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 12.5px;
+}
+.agy-inbox-pop-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12.5px;
+}
+.agy-inbox-pop-item:hover {
+  background: var(--secondary, rgba(10,10,12,0.07));
+}
+.agy-inbox-pop-time {
+  color: var(--muted-foreground, #71717a);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+#${INBOX_TOAST_ID} {
+  position: fixed;
+  z-index: 99998;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  background: var(--card, #ffffff);
+  color: var(--foreground, #18181b);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.16);
+  font-size: 12px;
+  pointer-events: auto;
+}
+.agy-inbox-undo-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--secondary, rgba(10,10,12,0.08));
+  color: #2563eb;
+  flex-shrink: 0;
+}
+.agy-inbox-undo-btn:hover {
+  filter: brightness(0.95);
+}
+#${MENU_INBOX_TOGGLE_ID}[data-checked="true"]::after {
+  content: "";
+  margin-left: auto;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  background-color: currentColor;
+  -webkit-mask: ${CHECK_MASK_URI} center / contain no-repeat;
+  mask: ${CHECK_MASK_URI} center / contain no-repeat;
+}
+#${MENU_INBOX_TOGGLE_ID}:hover,
+#${MENU_INBOX_RETIRE_ID}:hover {
+  background: var(--secondary, rgba(10,10,12,0.07));
+  color: var(--foreground, #000000);
+}
 `;
 
   function ensureStyle() {
@@ -1067,16 +1581,414 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   };
 
   const state = {
-    prefs: { language: 'zh-CN', groupByDimensions: null, collapsedGroupKeys: [], showArchived: false },
+    prefs: {
+      language: 'zh-CN',
+      groupByDimensions: null,
+      collapsedGroupKeys: [],
+      showArchived: false,
+      inboxEnabled: true,
+      inboxEnabledAtMs: 0,
+      inboxAutoRetireHours: 24,
+      inboxSettled: {},
+      inboxFollowUp: {},
+      inboxSnoozed: {},
+    },
     detectedNativeDim: 'status',
     tree: { projects: [], conversations: [], stats: { totalProjects: 0, totalConversations: 0, runningCount: 0 } },
     expandedLimits: {},
     expandedReadIdleGroups: new Set(),
     localViewedMs: new Map(),
+    inboxMetaById: new Map(),
+    convById: new Map(),
+    toastTimer: null,
+    popoverState: null,
     refreshTick: 0,
     prefsSeq: 0,
     triggerRefresh: null,
   };
+
+  const RETIRE_CYCLE = [12, 24, 48, 168];
+
+  function getInboxPrefsFromState(prefs = state.prefs) {
+    return {
+      enabled: prefs.inboxEnabled !== false,
+      enabledAtMs: Number(prefs.inboxEnabledAtMs || 0),
+      autoRetireHours: Number(prefs.inboxAutoRetireHours || 24),
+      settled: prefs.inboxSettled || {},
+      followUp: prefs.inboxFollowUp || {},
+      snoozed: prefs.inboxSnoozed || {},
+    };
+  }
+
+  function svgDomIcon(pathD, size = 14) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 -960 960 960');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('fill', 'currentColor');
+    svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', pathD);
+    svg.appendChild(path);
+    return svg;
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  function formatTimeHHMM(ms) {
+    const d = new Date(ms);
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
+  function formatShortUntil(ms, nowMs = Date.now()) {
+    const d = new Date(ms);
+    const now = new Date(nowMs);
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+      return formatTimeHHMM(ms);
+    }
+    return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${formatTimeHHMM(ms)}`;
+  }
+
+  function computeSnoozeOptions(nowMs, t) {
+    const h2 = nowMs + 2 * 3600000;
+    const tmr = new Date(nowMs);
+    tmr.setDate(tmr.getDate() + 1);
+    tmr.setHours(9, 0, 0, 0);
+    const d3 = nowMs + 72 * 3600000;
+    return [
+      { key: '2h', label: t.snooze2h, untilMs: h2, hint: formatTimeHHMM(h2) },
+      { key: 'tomorrow', label: t.snoozeTomorrow, untilMs: tmr.getTime(), hint: formatTimeHHMM(tmr.getTime()) },
+      { key: '3d', label: t.snooze3d, untilMs: d3, hint: formatShortUntil(d3, nowMs) },
+    ];
+  }
+
+  function cloneInboxSnapshot(prefs = state.prefs) {
+    return {
+      inboxSettled: { ...(prefs.inboxSettled || {}) },
+      inboxFollowUp: { ...(prefs.inboxFollowUp || {}) },
+      inboxSnoozed: { ...(prefs.inboxSnoozed || {}) },
+    };
+  }
+
+  function closeSnoozePopover() {
+    state.popoverState = null;
+    document.getElementById(SNOOZE_POPOVER_ID)?.remove();
+  }
+
+  function clearUndoToast() {
+    if (state.toastTimer) {
+      clearTimeout(state.toastTimer);
+      state.toastTimer = null;
+    }
+    document.getElementById(INBOX_TOAST_ID)?.remove();
+  }
+
+  function showUndoToast(message, undoPatch) {
+    clearUndoToast();
+    const listEl = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    const rect = listEl?.getBoundingClientRect?.();
+    const t = getI18n(state.prefs.language);
+
+    const toast = el('div', '');
+    toast.id = INBOX_TOAST_ID;
+    if (rect && rect.width > 120) {
+      toast.style.left = `${Math.max(8, Math.round(rect.left + 8))}px`;
+      toast.style.width = `${Math.max(180, Math.round(rect.width - 16))}px`;
+      toast.style.bottom = `${Math.max(12, Math.round(window.innerHeight - rect.bottom + 10))}px`;
+    } else {
+      toast.style.left = '12px';
+      toast.style.bottom = '14px';
+      toast.style.minWidth = '220px';
+    }
+
+    const textSpan = el('span', 'truncate', message);
+    const undoBtn = el('button', 'agy-inbox-undo-btn', t.undo);
+    undoBtn.type = 'button';
+    undoBtn.setAttribute('data-testid', 'agy-inbox-undo-button');
+    undoBtn.addEventListener('click', ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      clearUndoToast();
+      void updatePrefs(undoPatch);
+    });
+
+    toast.appendChild(textSpan);
+    toast.appendChild(undoBtn);
+    document.body.appendChild(toast);
+
+    state.toastTimer = setTimeout(() => {
+      clearUndoToast();
+    }, 5000);
+  }
+
+  function settleConversation(id) {
+    if (!id) return;
+    const prev = cloneInboxSnapshot();
+    const conv = state.convById.get(id);
+    const nowMs = Date.now();
+    const nextSettled = { ...(state.prefs.inboxSettled || {}) };
+    const nextFollow = { ...(state.prefs.inboxFollowUp || {}) };
+    const nextSnoozed = { ...(state.prefs.inboxSnoozed || {}) };
+    nextSettled[id] = {
+      atMs: nowMs,
+      updatedMs: Number(conv?.updatedAtMs || 0),
+      ...(conv?.markedAsUnread ? { settledMarkedUnread: true } : {}),
+    };
+    delete nextFollow[id];
+    delete nextSnoozed[id];
+    closeSnoozePopover();
+    const t = getI18n(state.prefs.language);
+    showUndoToast(t.toastSettled, prev);
+    void updatePrefs({
+      inboxSettled: nextSettled,
+      inboxFollowUp: nextFollow,
+      inboxSnoozed: nextSnoozed,
+    });
+  }
+
+  function toggleFollowUpConversation(id, forceValue = null) {
+    if (!id) return;
+    const meta = state.inboxMetaById.get(id);
+    const nextEnable = typeof forceValue === 'boolean' ? forceValue : !Boolean(meta?.isFollowUp);
+    const nowMs = Date.now();
+    const nextFollow = { ...(state.prefs.inboxFollowUp || {}) };
+    const nextSettled = { ...(state.prefs.inboxSettled || {}) };
+    const nextSnoozed = { ...(state.prefs.inboxSnoozed || {}) };
+    if (nextEnable) {
+      nextFollow[id] = nowMs;
+      delete nextSettled[id];
+      delete nextSnoozed[id];
+    } else {
+      delete nextFollow[id];
+    }
+    closeSnoozePopover();
+    void updatePrefs({
+      inboxFollowUp: nextFollow,
+      inboxSettled: nextSettled,
+      inboxSnoozed: nextSnoozed,
+    });
+  }
+
+  function snoozeConversation(id, untilMs) {
+    if (!id || !(untilMs > 0)) return;
+    const prev = cloneInboxSnapshot();
+    const conv = state.convById.get(id);
+    const nowMs = Date.now();
+    const nextSnoozed = { ...(state.prefs.inboxSnoozed || {}) };
+    const nextSettled = { ...(state.prefs.inboxSettled || {}) };
+    const nextFollow = { ...(state.prefs.inboxFollowUp || {}) };
+    nextSnoozed[id] = {
+      untilMs,
+      setAtMs: nowMs,
+      updatedMs: Number(conv?.updatedAtMs || 0),
+    };
+    delete nextSettled[id];
+    delete nextFollow[id];
+    closeSnoozePopover();
+    const t = getI18n(state.prefs.language);
+    showUndoToast(t.toastSnoozed.replace('{time}', formatShortUntil(untilMs, nowMs)), prev);
+    void updatePrefs({
+      inboxSnoozed: nextSnoozed,
+      inboxSettled: nextSettled,
+      inboxFollowUp: nextFollow,
+    });
+  }
+
+  function wakeConversation(id) {
+    if (!id) return;
+    const conv = state.convById.get(id);
+    const nowMs = Date.now();
+    const nextSnoozed = { ...(state.prefs.inboxSnoozed || {}) };
+    const nextSettled = { ...(state.prefs.inboxSettled || {}) };
+    nextSnoozed[id] = {
+      untilMs: nowMs,
+      setAtMs: nowMs - 1,
+      updatedMs: Number(conv?.updatedAtMs || 0),
+    };
+    delete nextSettled[id];
+    closeSnoozePopover();
+    void updatePrefs({
+      inboxSnoozed: nextSnoozed,
+      inboxSettled: nextSettled,
+    });
+  }
+
+  function openSnoozePopover(id, anchorEl) {
+    if (state.popoverState?.cascadeId === id) {
+      closeSnoozePopover();
+      return;
+    }
+    closeSnoozePopover();
+    const nowMs = Date.now();
+    const t = getI18n(state.prefs.language);
+    const opts = computeSnoozeOptions(nowMs, t);
+    const pop = el('div', '');
+    pop.id = SNOOZE_POPOVER_ID;
+    pop.setAttribute('data-cascade-id', id);
+
+    const stopEv = ev => {
+      ev.stopPropagation();
+    };
+    pop.addEventListener('pointerdown', stopEv);
+    pop.addEventListener('mousedown', stopEv);
+
+    for (const opt of opts) {
+      const btn = el('button', 'agy-inbox-pop-item');
+      btn.type = 'button';
+      btn.setAttribute('data-agy-snooze-preset', opt.key);
+      const l = el('span', '', opt.label);
+      const r = el('span', 'agy-inbox-pop-time', opt.hint);
+      btn.appendChild(l);
+      btn.appendChild(r);
+      btn.addEventListener('click', ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        snoozeConversation(id, opt.untilMs);
+      });
+      pop.appendChild(btn);
+    }
+
+    document.body.appendChild(pop);
+    const anchorRect = anchorEl.getBoundingClientRect();
+    const popRect = pop.getBoundingClientRect();
+    const left = Math.min(Math.max(8, anchorRect.left), Math.max(8, window.innerWidth - popRect.width - 8));
+    const fitsBelow = anchorRect.bottom + 4 + popRect.height <= window.innerHeight - 8;
+    const top = fitsBelow ? anchorRect.bottom + 4 : Math.max(8, anchorRect.top - popRect.height - 4);
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+    state.popoverState = { cascadeId: id };
+  }
+
+  function makeHoverBtn({ iconPath, title, action, active = false, onClick }) {
+    const btn = el('button', 'agy-inbox-btn');
+    btn.type = 'button';
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+    btn.setAttribute('data-agy-action', action);
+    if (active) btn.setAttribute('data-agy-active', 'true');
+    btn.appendChild(svgDomIcon(iconPath, 15));
+    const stopOnly = ev => {
+      ev.stopPropagation();
+    };
+    btn.addEventListener('pointerdown', stopOnly);
+    btn.addEventListener('mousedown', stopOnly);
+    btn.addEventListener('click', ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      onClick(btn, ev);
+    });
+    return btn;
+  }
+
+  function syncRowInboxControls() {
+    const enabled = state.prefs.inboxEnabled !== false && !state.prefs.showArchived;
+    if (!enabled) {
+      for (const n of document.querySelectorAll('.agy-inbox-controls, .agy-inbox-badge')) n.remove();
+      closeSnoozePopover();
+      return;
+    }
+    const listEl = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    if (!listEl) return;
+    const t = getI18n(state.prefs.language);
+    const nowMs = Date.now();
+    const rows = listEl.querySelectorAll('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+
+    for (const row of rows) {
+      const id = row.getAttribute('data-cascade-id');
+      if (!id) continue;
+      const meta = state.inboxMetaById.get(id);
+      const actions = row.querySelector('.agy-row-actions');
+      const existingCtrl = row.querySelector('.agy-inbox-controls');
+      const existingBadge = row.querySelector('.agy-inbox-badge');
+
+      if (!meta || meta.bucket === 'active') {
+        existingCtrl?.remove();
+        existingBadge?.remove();
+        continue;
+      }
+
+      const desiredSig = `${meta.bucket}|${meta.isFollowUp ? 1 : 0}|${meta.isWoke ? 1 : 0}|${meta.snoozedUntilMs || 0}|${state.prefs.language}`;
+      if (actions) {
+        if (!existingCtrl || existingCtrl.getAttribute('data-agy-sig') !== desiredSig) {
+          existingCtrl?.remove();
+          const wrap = el('span', 'agy-inbox-controls');
+          wrap.setAttribute('data-agy-sig', desiredSig);
+          if (meta.bucket === 'inbox') {
+            wrap.appendChild(makeHoverBtn({
+              iconPath: ICON_PATHS.push_pin,
+              title: meta.isFollowUp ? t.actionUnfollowUp : t.actionFollowUp,
+              action: 'followup',
+              active: Boolean(meta.isFollowUp),
+              onClick: () => toggleFollowUpConversation(id),
+            }));
+            wrap.appendChild(makeHoverBtn({
+              iconPath: ICON_PATHS.snooze,
+              title: t.actionSnooze,
+              action: 'snooze',
+              onClick: btn => openSnoozePopover(id, btn),
+            }));
+            wrap.appendChild(makeHoverBtn({
+              iconPath: ICON_PATHS.check,
+              title: t.actionSettle,
+              action: 'settle',
+              onClick: () => settleConversation(id),
+            }));
+          } else if (meta.bucket === 'snoozed') {
+            wrap.appendChild(makeHoverBtn({
+              iconPath: ICON_PATHS.wake,
+              title: t.actionWake,
+              action: 'wake',
+              onClick: () => wakeConversation(id),
+            }));
+            wrap.appendChild(makeHoverBtn({
+              iconPath: ICON_PATHS.check,
+              title: t.actionSettle,
+              action: 'settle',
+              onClick: () => settleConversation(id),
+            }));
+          } else {
+            wrap.appendChild(makeHoverBtn({
+              iconPath: ICON_PATHS.push_pin,
+              title: t.actionKeepInbox,
+              action: 'keep',
+              onClick: () => toggleFollowUpConversation(id, true),
+            }));
+          }
+          actions.insertBefore(wrap, actions.firstChild);
+        }
+      }
+
+      let badgeKind = '';
+      let badgeText = '';
+      let badgeTitle = '';
+      if (meta.bucket === 'inbox' && meta.isFollowUp) {
+        badgeKind = 'followup';
+        badgeText = '📌';
+        badgeTitle = t.actionFollowUp;
+      } else if (meta.bucket === 'inbox' && meta.isWoke) {
+        badgeKind = 'woke';
+        badgeText = '⏰';
+        badgeTitle = t.snoozedTitle;
+      } else if (meta.bucket === 'snoozed' && meta.snoozedUntilMs) {
+        badgeKind = 'snoozed';
+        badgeText = `⏰ ${formatShortUntil(meta.snoozedUntilMs, nowMs)}`;
+        badgeTitle = badgeText;
+      }
+
+      if (!badgeKind) {
+        existingBadge?.remove();
+      } else if (!existingBadge || existingBadge.getAttribute('data-agy-bsig') !== `${badgeKind}:${badgeText}`) {
+        existingBadge?.remove();
+        const badge = el('span', 'agy-inbox-badge', badgeText);
+        badge.setAttribute('data-agy-kind', badgeKind);
+        badge.setAttribute('data-agy-bsig', `${badgeKind}:${badgeText}`);
+        if (badgeTitle) badge.title = badgeTitle;
+        row.appendChild(badge);
+      }
+    }
+  }
 
   function markActiveChatViewed() {
     const id = currentChatId();
@@ -1128,6 +2040,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   function shouldRenderCustomGrouping() {
+    if (state.prefs.inboxEnabled !== false && !state.prefs.showArchived) {
+      return true;
+    }
     const dims = getEffectiveDims();
     if (dims.length === 0) {
       return Boolean(state.detectedNativeDim && state.detectedNativeDim !== 'none');
@@ -1143,18 +2058,82 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     return dims.map(d => t.labels[d] || d).join(' + ');
   }
 
+  function formatRetireLabel(hours, t) {
+    return hours === 168 ? (t.retire168h || '7d') : `${hours}h`;
+  }
+
+  function attachMenuHoverHighlight(itemEl, menuBox) {
+    itemEl.addEventListener('pointerenter', () => {
+      for (const sib of menuBox.querySelectorAll('[data-highlighted]')) {
+        if (sib !== itemEl) sib.removeAttribute('data-highlighted');
+      }
+      itemEl.setAttribute('data-highlighted', '');
+    });
+    itemEl.addEventListener('pointerleave', () => {
+      itemEl.removeAttribute('data-highlighted');
+    });
+  }
+
+  function syncInboxDisplayMenu(t) {
+    const archivedItem = document.querySelector('[data-testid="view-option-archived"]');
+    const archivedRow = archivedItem?.closest('[role="menuitemcheckbox"], [role="menuitem"]');
+    const menuBox = archivedRow?.parentElement;
+    if (!menuBox) return;
+
+    const inboxEnabled = state.prefs.inboxEnabled !== false;
+    const retireHours = Number(state.prefs.inboxAutoRetireHours || 24);
+    const baseItemCls = 'agy-overlay-item group w-full pr-2 pl-2 text-left text-compact cursor-pointer outline-none no-focus-ring transition-colors select-none flex items-center rounded-md py-1 gap-1.5 text-secondary-foreground justify-between';
+
+    let toggleItem = menuBox.querySelector(`#${MENU_INBOX_TOGGLE_ID}`);
+    if (!toggleItem) {
+      toggleItem = el('div', baseItemCls);
+      toggleItem.id = MENU_INBOX_TOGGLE_ID;
+      toggleItem.setAttribute('role', 'menuitemcheckbox');
+      toggleItem.setAttribute('tabindex', '-1');
+      const lbl = el('span', 'truncate', t.menuInboxTriage);
+      toggleItem.appendChild(lbl);
+      attachMenuHoverHighlight(toggleItem, menuBox);
+      if (archivedRow.nextSibling) menuBox.insertBefore(toggleItem, archivedRow.nextSibling);
+      else menuBox.appendChild(toggleItem);
+    }
+    toggleItem.firstChild.textContent = t.menuInboxTriage;
+    toggleItem.setAttribute('aria-checked', inboxEnabled ? 'true' : 'false');
+    if (inboxEnabled) toggleItem.setAttribute('data-checked', 'true');
+    else toggleItem.removeAttribute('data-checked');
+
+    let retireItem = menuBox.querySelector(`#${MENU_INBOX_RETIRE_ID}`);
+    if (!retireItem) {
+      retireItem = el('div', baseItemCls);
+      retireItem.id = MENU_INBOX_RETIRE_ID;
+      retireItem.setAttribute('role', 'menuitem');
+      retireItem.setAttribute('tabindex', '-1');
+      const l = el('span', 'truncate', t.menuAutoRetire);
+      const r = el('span', 'ml-auto pl-2 text-muted-foreground tabular-nums', '');
+      retireItem.appendChild(l);
+      retireItem.appendChild(r);
+      attachMenuHoverHighlight(retireItem, menuBox);
+      if (toggleItem.nextSibling) menuBox.insertBefore(retireItem, toggleItem.nextSibling);
+      else menuBox.appendChild(retireItem);
+    }
+    retireItem.style.display = inboxEnabled ? '' : 'none';
+    retireItem.firstChild.textContent = t.menuAutoRetire;
+    retireItem.lastChild.textContent = formatRetireLabel(retireHours, t);
+  }
+
   async function updatePrefs(patch) {
     state.prefsSeq += 1;
     const seq = state.prefsSeq;
     state.prefs = { ...state.prefs, ...patch };
     syncOfficialMenus();
     requestReactRefresh();
+    requestAnimationFrame(() => syncRowInboxControls());
     try {
       const saved = await window.__agyProjectSidebarHost?.setPreferences?.(patch);
       if (state.prefsSeq === seq && saved && typeof saved === 'object' && !saved.offline) {
         state.prefs = { ...state.prefs, ...saved };
         syncOfficialMenus();
         requestReactRefresh();
+        requestAnimationFrame(() => syncRowInboxControls());
       }
     } catch { /* ignore optimistic fallback */ }
   }
@@ -1169,6 +2148,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   function syncOfficialMenus() {
     refreshDetectedNativeDim();
     const t = getI18n(state.prefs.language);
+    syncInboxDisplayMenu(t);
     const dims = getEffectiveDims();
     const customActive = shouldRenderCustomGrouping();
 
@@ -1340,6 +2320,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
       // Also skip non-primary trajectory types when collector is loaded unless very fresh (< 45s)
       const updatedAtMs = protoTsMs(sum.lastModifiedTime) || base?.updatedAtMs || 0;
+      const userInputAtMs = protoTsMs(sum.lastUserInputTime) || base?.userInputAtMs || 0;
       if (collectorMap.size > 0 && !base) {
         if (meta.nestingDepth && meta.nestingDepth > 0) continue;
         if (sum.trajectoryType === 3 || sum.trajectoryType === 5) continue;
@@ -1349,9 +2330,10 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         ? 'blocked'
         : ((sum.notFullyIdle || sum.status === 2 || sum.status === 4) ? 'in_progress' : 'idle');
 
+      const markedAsUnread = Boolean(sum.annotations?.markedAsUnread);
       let isUnread = false;
       if (id !== activeChatId) {
-        if (sum.annotations?.markedAsUnread) {
+        if (markedAsUnread) {
           isUnread = true;
         } else if (updatedAtMs > 0) {
           const viewMs = Math.max(protoTsMs(sum.annotations?.lastUserViewTime), state.localViewedMs.get(id) || 0);
@@ -1375,8 +2357,10 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         status: statusGroup === 'idle' ? 'idle' : 'running',
         statusGroup,
         isUnread,
+        markedAsUnread,
         isArchived,
         updatedAtMs,
+        userInputAtMs,
         projectKey,
         projectName,
         isUnassigned,
@@ -1392,7 +2376,12 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         const base = collectorMap.get(rawItem.cascadeId);
         if (base) {
           seen.add(rawItem.cascadeId);
-          merged.push({ ...base, statusGroup: getStatusGroup(base), isUnread: Boolean(base.isUnread) && base.id !== activeChatId });
+          merged.push({
+            ...base,
+            statusGroup: getStatusGroup(base),
+            isUnread: Boolean(base.isUnread) && base.id !== activeChatId,
+            markedAsUnread: Boolean(base.markedAsUnread),
+          });
         }
       }
     }
@@ -1607,18 +2596,28 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
       const archivedOnly = /\(Archived\)/i.test(mainHdr?.title || '') || Boolean(state.prefs.showArchived);
       const liveConvs = buildLiveConversations(patchedFiber, rawProps.items, excludedIds, archivedOnly);
+      state.convById = new Map(liveConvs.map(c => [c.id, c]));
 
       const t = getI18n(state.prefs.language);
       const dims = getEffectiveDims();
       const collapsedSet = new Set(state.prefs.collapsedGroupKeys || []);
+      const isHistory = rawProps.variant === 'history';
+      const outMetaById = new Map();
+      const useInbox = !archivedOnly && !isHistory && state.prefs.inboxEnabled !== false;
       const virtualItems = buildVirtualItemsForDims(liveConvs, dims, {
         collapsedSet,
         expandedReadIdleGroups: state.expandedReadIdleGroups,
         expandedLimits: state.expandedLimits,
         activeChatId: currentChatId(),
-        isHistory: rawProps.variant === 'history',
+        isHistory,
+        inbox: useInbox ? getInboxPrefsFromState(state.prefs) : undefined,
+        nowMs: Date.now(),
+        outMetaById,
         t,
       });
+      if (!isHistory) {
+        state.inboxMetaById = outMetaById;
+      }
 
       const styledItems = virtualItems.map(it => {
         if (it.type === 'show-more' && it._agyIndentPx) {
@@ -1705,7 +2704,37 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   // Window capture-phase multi-select interceptor: keeps Base-UI Group By submenu open when toggling dimensions
   const INTERCEPT_EVENTS = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
   const onWindowMenuEvent = e => {
-    const radio = e.target?.closest?.('[role="menuitemradio"]');
+    const targetEl = e.target;
+    if (e.type === 'pointerdown' && state.popoverState) {
+      const pop = document.getElementById(SNOOZE_POPOVER_ID);
+      if (pop && !pop.contains(targetEl) && !targetEl?.closest?.('[data-agy-action="snooze"]')) {
+        closeSnoozePopover();
+      }
+    }
+
+    const inboxMenuEl = targetEl?.closest?.(`#${MENU_INBOX_TOGGLE_ID}, #${MENU_INBOX_RETIRE_ID}`);
+    if (inboxMenuEl) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      if (e.type !== 'click') return;
+      if (inboxMenuEl.id === MENU_INBOX_TOGGLE_ID) {
+        const nextEnabled = state.prefs.inboxEnabled === false;
+        const patch = { inboxEnabled: nextEnabled };
+        if (nextEnabled && !state.prefs.inboxEnabledAtMs) {
+          patch.inboxEnabledAtMs = Date.now();
+        }
+        void updatePrefs(patch);
+      } else {
+        const cur = Number(state.prefs.inboxAutoRetireHours || 24);
+        const idx = RETIRE_CYCLE.indexOf(cur);
+        const nextHours = RETIRE_CYCLE[(idx + 1) % RETIRE_CYCLE.length];
+        void updatePrefs({ inboxAutoRetireHours: nextHours });
+      }
+      return;
+    }
+
+    const radio = targetEl?.closest?.('[role="menuitemradio"]');
     if (!radio) return;
     const groupBox = radio.parentElement;
     if (!groupBox || !groupBox.querySelector('[data-testid="group-by-option-project"]')) return;
@@ -1760,6 +2789,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         ensureNativeListPatched();
         syncOfficialMenus();
         requestReactRefresh();
+        requestAnimationFrame(() => syncRowInboxControls());
       }
     } finally {
       polling = false;
@@ -1774,12 +2804,14 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       syncScheduled = false;
       ensureNativeListPatched();
       syncOfficialMenus();
+      syncRowInboxControls();
     });
   };
 
   const onRouteChange = () => {
     markActiveChatViewed();
     requestReactRefresh();
+    requestAnimationFrame(() => syncRowInboxControls());
   };
 
   const mo = new MutationObserver(() => {
@@ -1794,16 +2826,22 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   markActiveChatViewed();
   ensureNativeListPatched();
   syncOfficialMenus();
+  syncRowInboxControls();
   void pollTree(true);
 
   window.__agyProjectSidebarDispose = () => {
     clearInterval(pollTimer);
+    clearUndoToast();
+    closeSnoozePopover();
     mo.disconnect();
     for (const ev of INTERCEPT_EVENTS) {
       window.removeEventListener(ev, onWindowMenuEvent, true);
     }
     window.removeEventListener('popstate', onRouteChange);
     document.getElementById(MENU_OPT_ID)?.remove();
+    document.getElementById(MENU_INBOX_TOGGLE_ID)?.remove();
+    document.getElementById(MENU_INBOX_RETIRE_ID)?.remove();
+    for (const n of document.querySelectorAll('.agy-inbox-controls, .agy-inbox-badge')) n.remove();
     for (const n of document.querySelectorAll('[data-agy-req-groupby]')) n.removeAttribute('data-agy-req-groupby');
     for (const n of document.querySelectorAll('[data-agy-checked]')) n.removeAttribute('data-agy-checked');
     for (const n of document.querySelectorAll('[data-agy-order]')) n.removeAttribute('data-agy-order');
@@ -1814,6 +2852,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       if (patchedFiber.alternate) patchedFiber.alternate.type = origUMcFn;
       patchedFiber = null;
     }
+    state.inboxMetaById.clear();
+    state.convById.clear();
     requestReactRefresh();
     delete window.__agyProjectSidebarInstalled;
   };
