@@ -158,16 +158,27 @@ export async function loadSidebarState({
   return { paths, prefs, inboxModel, nowMs, conversations: enriched };
 }
 
-/** Search conversations matching all query terms across title, project, repo, ID, or req label. */
-export function searchConversations(conversations, terms = [], limit = 25) {
+/**
+ * Search conversations matching query terms across title, project, repo, ID, or req label.
+ * Defaults to OR matching (ranked by hit count then recency) so alias terms like "OV OpenViking"
+ * surface scattered related threads; pass { matchAll: true } for strict AND matching.
+ */
+export function searchConversations(conversations, terms = [], limit = 25, { matchAll = false } = {}) {
   const cleanTerms = terms.map(t => String(t || '').trim().toLowerCase()).filter(Boolean);
-  const matched = cleanTerms.length === 0
-    ? conversations
-    : conversations.filter(c => {
-        const haystack = [c.id, c.title, c.projectName, c.repoName, c.reqKey, c.reqLabel].join(' ').toLowerCase();
-        return cleanTerms.every(term => haystack.includes(term));
-      });
-  return matched.slice(0, Math.max(1, limit)).map(c => ({
+  let ranked;
+  if (cleanTerms.length === 0) {
+    ranked = conversations.map(c => ({ conv: c, score: 1 }));
+  } else {
+    ranked = [];
+    for (const c of conversations) {
+      const haystack = [c.id, c.title, c.projectName, c.repoName, c.reqKey, c.reqLabel].join(' ').toLowerCase();
+      const hitCount = cleanTerms.filter(term => haystack.includes(term)).length;
+      const matches = matchAll ? hitCount === cleanTerms.length : hitCount > 0;
+      if (matches) ranked.push({ conv: c, score: hitCount });
+    }
+    ranked.sort((a, b) => (b.score - a.score) || ((b.conv.updatedAtMs || 0) - (a.conv.updatedAtMs || 0)));
+  }
+  return ranked.slice(0, Math.max(1, limit)).map(({ conv: c, score }) => ({
     id: c.id,
     shortId: c.id.slice(0, 8),
     title: c.title,
@@ -178,7 +189,23 @@ export function searchConversations(conversations, terms = [], limit = 25) {
     reqKey: c.reqKey,
     reqLabel: c.reqLabel,
     updatedIso: c.updatedIso,
+    matchScore: score,
   }));
+}
+
+/** Summarize whether search results are already unified or fragmented across INBOX/groups/projects. */
+export function summarizeSearchFragmentation(hits = []) {
+  const ungroupedCount = hits.filter(h => !h.reqKey || h.reqKey === 'INBOX').length;
+  const distinctReqKeys = [...new Set(hits.map(h => h.reqKey).filter(k => k && k !== 'INBOX'))];
+  const distinctProjects = [...new Set(hits.map(h => h.projectKey || h.projectName).filter(Boolean))];
+  const fragmented = hits.length >= 2 && (ungroupedCount > 0 || distinctReqKeys.length > 1 || distinctReqKeys.length === 0);
+  return {
+    totalHits: hits.length,
+    ungroupedCount,
+    distinctReqKeys,
+    distinctProjects,
+    fragmented,
+  };
 }
 
 /** Group items inside each status bucket and compute bucket-specific reqLabels. */
@@ -292,11 +319,12 @@ function parseCliArgs(argv) {
   const [command, ...rest] = argv;
   const positional = [];
   const pairs = [];
-  const opts = { json: false, noLs: false, limit: 25, dbPath: undefined, prefsPath: undefined };
+  const opts = { json: false, noLs: false, matchAll: false, limit: 25, dbPath: undefined, prefsPath: undefined };
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i];
     if (arg === '--json') opts.json = true;
     else if (arg === '--no-ls') opts.noLs = true;
+    else if (arg === '--all') opts.matchAll = true;
     else if (arg === '--limit') opts.limit = Number(rest[++i] || 25);
     else if (arg === '--db') opts.dbPath = rest[++i];
     else if (arg === '--prefs') opts.prefsPath = rest[++i];
@@ -310,9 +338,15 @@ function parseCliArgs(argv) {
 function formatTextReport(command, result) {
   if (command === 'search') {
     if (result.length === 0) return 'No matching conversations found.';
-    return result.map(r => (
+    const lines = result.map(r => (
       `${r.shortId} | ${r.bucket.padEnd(7)} | ${r.projectName} | ${r.reqKey} | ${r.title}`
-    )).join('\n');
+    ));
+    if (result.length >= 2) {
+      const frag = summarizeSearchFragmentation(result);
+      const stateText = frag.fragmented ? 'FRAGMENTED (candidate to consolidate)' : 'UNIFIED';
+      lines.push(`[summary] ${frag.totalHits} hits | projects=${frag.distinctProjects.length} | groups=${frag.distinctReqKeys.length} | ungrouped=${frag.ungroupedCount} | ${stateText}`);
+    }
+    return lines.join('\n');
   }
   return JSON.stringify(result, null, 2);
 }
@@ -322,7 +356,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (!command || command === '--help' || command === '-h') {
     console.log([
       'Usage:',
-      '  preview-grouping.mjs search [terms...] [--limit 25] [--json]',
+      '  preview-grouping.mjs search [terms...] [--all] [--limit 25] [--json]',
       '  preview-grouping.mjs check <idOrPrefix>=<newTitle> ... [--json]',
       '  preview-grouping.mjs verify <idOrPrefix> ... [--json]',
     ].join('\n'));
@@ -334,7 +368,7 @@ export async function main(argv = process.argv.slice(2)) {
   let exitCode = 0;
 
   if (command === 'search') {
-    result = searchConversations(state.conversations, positional, opts.limit);
+    result = searchConversations(state.conversations, positional, opts.limit, { matchAll: opts.matchAll });
   } else if (command === 'check') {
     result = previewGrouping(state, pairs);
     if (!result.ok) exitCode = 2;

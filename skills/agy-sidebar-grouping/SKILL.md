@@ -1,11 +1,12 @@
 ---
 name: agy-sidebar-grouping
 description: >-
-  Organize, consolidate, or clean up multiple Antigravity conversations into one
-  sidebar requirement group using agy-project-sidebar rules and agy-rename.
-  Use when the user asks to group or curate related sessions under one
-  requirement in the sidebar, combine multi-project threads cleanly (e.g.
-  "把这几个会话组成一个需求组", "汇总历史会话到侧边栏需求", "整理需求分组").
+  Proactively or on request organize, consolidate, or align Antigravity
+  conversations into one sidebar requirement group using agy-project-sidebar
+  rules and agy-rename. Use whenever the user asks to group/curate sessions, OR
+  autonomously when recalling past chats, summarizing multi-session findings,
+  detecting >=2 scattered/cross-project sessions on the same topic, or naming
+  a new session that continues an existing requirement.
 ---
 
 # AGY Sidebar Requirement Grouping
@@ -13,6 +14,15 @@ description: >-
 Bundle related Antigravity conversations into one cohesive sidebar requirement
 group without corrupting timestamps, violating session-naming rules, or
 splitting cross-project chats.
+
+## Autonomous On-Demand Triggers & Safety Boundary
+
+Do not scan history on unrelated trivial turns. Trigger autonomously when the
+current task already involves session recall, multi-session summary, or
+continuing a prior thread:
+
+- **Auto-align the current session**: If `search` shows the ongoing work clearly belongs to an existing unambiguous requirement key (`COC-4`, `Issue 80`, etc.), name or update **the current session itself** with that prefix right away via `agy-rename`.
+- **Propose before batch-renaming other old sessions**: If `search` spots `>= 2` scattered `INBOX` or cross-project sibling sessions on the same topic, spot-check their transcripts to exclude false positives (e.g. a different task sharing a tool keyword), run `check`, and present the exact candidate list + proposed group name for a quick confirmation—unless the user already asked to consolidate/organize them.
 
 ## Core Grouping Rules (`compat/sidebar-widget.cjs`)
 
