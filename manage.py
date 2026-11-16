@@ -22,7 +22,7 @@ PANEL_DATA = SIDECAR_DATA / 'panel'
 SETTINGS_FILE = SIDECAR_DATA / 'settings.json'
 OWNER_FILE = PANEL_DATA / 'ownership.json'
 HEALTH_FILE = PANEL_DATA / 'integration-state.json'
-RUNTIME_ITEMS = ('plugin.json', 'assets', 'compat', 'sidecars')
+RUNTIME_ITEMS = ('plugin.json', 'assets', 'compat', 'sidecars', 'skills')
 IGNORE = shutil.ignore_patterns('__pycache__', '*.pyc', '*.log', '.DS_Store', 'data', 'sdk')
 
 
