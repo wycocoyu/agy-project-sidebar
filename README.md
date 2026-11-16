@@ -15,6 +15,7 @@ Legacy web-bundle patches modified `/Applications/Antigravity.app` binaries and 
 - **Zero Extra Sidebar Bars**: Adds zero custom toolbars, search boxes, or floating buttons to the sidebar.
 - **Official Multi-Select `Group By` (`Status + Requirement`, `Project + Requirement`, etc.)**: Appends `Requirement` directly inside Antigravity's official `Display Options` -> `Group By` submenu (`Project / Requirement / Repo / Environment / Status / None`) and turns `Group By` into an ordered multi-select menu (`1 ✓`, `2 ✓`). Clicking `None` clears multi-select and yields back to official Antigravity immediately.
 - **Multi-Level Collapsible Nested Tree**: Renders nested collapsible hierarchy sections (e.g. `In Progress -> MUL-797` and `Idle -> #2814 / Q137 / Standalone`) from Antigravity's full SQLite database + `language_server` projects while keeping `Pinned Conversations` and the `Conversations` header live.
+- **Bundled `agy-sidebar-grouping` Skill**: Ships a plugin skill (`skills/agy-sidebar-grouping`) with a read-only preview CLI so Antigravity agents can search historical chats, verify cross-project prefix tokens (`COC-4` vs `Issue 4`), and bundle related sessions via `agy-rename` without altering timestamps.
 - **Zero-Dependency**: Runs directly on Antigravity Helper's bundled Node v24 (`node:sqlite`, global `WebSocket`) + Python 3 standard library.
 
 ## Quick Install
