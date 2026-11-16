@@ -11,8 +11,39 @@ const execFileAsync = promisify(execFile);
 
 const TECH_ID_RE = /^(?:GPT|UTF|SHA|ISO|HTTP|HTTPS|CVE|NODE|PR|V\d+)-\d+$/i;
 const SESSION_NAME_RE = /^(\d{4})\s*\|\s*([^|]+?)\s*\|\s*(.+)$/;
-const PREFIX_ISSUE_RE = /^(#[1-9]\d*|[Qq]\d+|PR\s*#?\d+|[A-Za-z][A-Za-z0-9]{1,9}-\d+)\b[\s|:：\-]*(.*)$/;
-const EMBEDDED_ISSUE_RE = /(?:^|[\s|(\[【])(#[1-9]\d*|[A-Z]{2,10}-\d+|[Qq]\d{2,})\b/;
+const PREFIX_ISSUE_RE = /^(#[1-9]\d*|Issue\s*#?\s*[1-9]\d*|PR\s*#?\s*[1-9]\d*|[Qq]\d+|[A-Za-z][A-Za-z0-9]{1,9}-\d+)\b[\s|:：\-]*(.*)$/i;
+const EMBEDDED_ISSUE_RE = /(?:^|[\s|(\[【])(#[1-9]\d*|Issue\s*#?\s*[1-9]\d*|PR\s*#?\s*[1-9]\d*|[A-Z]{2,10}-\d+|[Qq]\d{2,})\b/i;
+const BRACKET_THEME_RE = /^(?:\[([^\[\]]{2,24})\]|【([^【】]{2,24})】)[\s|:：\-]*(.*)$/;
+
+function cleanRequirementLabel(rawText, fallback = '') {
+  const cleaned = String(rawText || '')
+    .replace(/\bPR\s*#\s*(\d+)/gi, 'PR $1')
+    .replace(/\bIssue\s*#\s*(\d+)/gi, 'Issue $1')
+    .replace(/\/\s*#\s*(\d+)/g, '/$1')
+    .replace(/([A-Za-z0-9\u4e00-\u9fff])#(\d+)/g, '$1 $2')
+    .replace(/(^|[\s(\[【\-])#(\d+)/g, '$1$2')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return cleaned || fallback;
+}
+
+function normalizeIssueToken(rawToken) {
+  const trimmed = String(rawToken || '').trim();
+  if (trimmed.startsWith('#')) {
+    const num = trimmed.slice(1);
+    return { key: `ISSUE:${num}`, shortId: num, fallbackLabel: `Issue ${num}`, scopeByProject: true, isLeadingHash: true };
+  }
+  let m = trimmed.match(/^Issue\s*#?\s*([1-9]\d*)$/i);
+  if (m) {
+    return { key: `ISSUE:${m[1]}`, shortId: `Issue ${m[1]}`, fallbackLabel: `Issue ${m[1]}`, scopeByProject: true, isLeadingHash: false };
+  }
+  m = trimmed.match(/^PR\s*#?\s*([1-9]\d*)$/i);
+  if (m) {
+    return { key: `PR:${m[1]}`, shortId: `PR ${m[1]}`, fallbackLabel: `PR ${m[1]}`, scopeByProject: true, isLeadingHash: false };
+  }
+  const upper = trimmed.toUpperCase();
+  return { key: `ISSUE:${upper}`, shortId: upper, fallbackLabel: upper, scopeByProject: false, isLeadingHash: false };
+}
 
 export function normalizeLocalPath(uriOrPath) {
   if (!uriOrPath || typeof uriOrPath !== 'string') return '';
@@ -131,12 +162,23 @@ export function extractRequirementDescriptor(title) {
     if (!text) continue;
     const prefixMatch = text.match(PREFIX_ISSUE_RE);
     if (prefixMatch) {
-      const token = prefixMatch[1].replace(/^PR\s*#?/i, 'PR#').replace(/\s+/g, '');
-      const normalizedToken = token.startsWith('#') ? token : token.toUpperCase();
-      if (!TECH_ID_RE.test(normalizedToken)) {
-        const tail = prefixMatch[2].trim();
-        const label = tail ? `${normalizedToken} ${tail}` : normalizedToken;
-        return { kind: 'issue', key: `ISSUE:${normalizedToken}`, shortId: normalizedToken, label };
+      const info = normalizeIssueToken(prefixMatch[1]);
+      if (!TECH_ID_RE.test(info.shortId)) {
+        const rawTail = prefixMatch[2].replace(/^(?:[\s/:：\-]*#\d+\b)+[\s/:：\-]*/g, '').trim();
+        let label;
+        if (info.isLeadingHash) {
+          label = rawTail ? cleanRequirementLabel(rawTail, info.fallbackLabel) : info.fallbackLabel;
+        } else {
+          const combined = rawTail ? `${info.shortId} ${rawTail}` : info.shortId;
+          label = cleanRequirementLabel(combined, info.fallbackLabel);
+        }
+        return {
+          kind: 'issue',
+          key: info.key,
+          shortId: info.shortId,
+          label,
+          scopeByProject: info.scopeByProject,
+        };
       }
     }
   }
@@ -145,23 +187,33 @@ export function extractRequirementDescriptor(title) {
     if (!text) continue;
     const embMatch = text.match(EMBEDDED_ISSUE_RE);
     if (embMatch) {
-      const token = embMatch[1].startsWith('#') ? embMatch[1] : embMatch[1].toUpperCase();
-      if (!TECH_ID_RE.test(token)) {
-        return { kind: 'issue', key: `ISSUE:${token}`, shortId: token, label: `${token} · ${parsed.subject || text}` };
+      const info = normalizeIssueToken(embMatch[1]);
+      if (!TECH_ID_RE.test(info.shortId)) {
+        return {
+          kind: 'issue',
+          key: info.key,
+          shortId: info.shortId,
+          label: cleanRequirementLabel(parsed.subject || text, info.fallbackLabel),
+          scopeByProject: info.scopeByProject,
+        };
       }
     }
   }
 
   if (parsed.hasStandardFormat && parsed.subject) {
+    const bracketMatch = parsed.subject.match(BRACKET_THEME_RE);
+    const rawTag = bracketMatch ? (bracketMatch[1] || bracketMatch[2] || '').trim() : '';
+    const themeLabel = cleanRequirementLabel(rawTag || parsed.subject, rawTag || parsed.subject);
     return {
       kind: 'theme-candidate',
-      key: `THEME:${parsed.subject.toLowerCase()}`,
+      key: `THEME:${themeLabel.toLowerCase()}`,
       shortId: '',
-      label: parsed.subject,
+      label: themeLabel,
+      scopeByProject: true,
     };
   }
 
-  return { kind: 'inbox', key: 'INBOX', shortId: '', label: '' };
+  return { kind: 'inbox', key: 'INBOX', shortId: '', label: '', scopeByProject: false };
 }
 
 export function parseTimestampMs(value) {
@@ -190,7 +242,7 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     const notFullyIdle = Boolean(row.not_fully_idle);
     const statusGroup = row.status === 'CASCADE_RUN_STATUS_WAITING'
       ? 'blocked'
-      : ((isRunning || notFullyIdle) ? 'in_progress' : 'idle');
+      : (isRunning ? 'in_progress' : 'idle');
 
     const matchedProj = !projMatch.isUnassigned ? projectsById.get(projMatch.projectKey) : null;
     const repoName = matchedProj?.folderPaths?.[0]
@@ -218,22 +270,23 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     });
   }
 
-  // Count how many conversations in each project share a theme-candidate key
+  // Count how many conversations in each scope share a theme-candidate or explicit issue key
   const themeCounts = new Map();
+  const issueCounts = new Map();
+  const issueLabels = new Map();
   for (const item of items) {
     if (item.reqCandidate.kind === 'theme-candidate') {
       const scopeKey = `${item.projectKey}::${item.reqCandidate.key}`;
       themeCounts.set(scopeKey, (themeCounts.get(scopeKey) || 0) + 1);
-    }
-  }
-
-  // Track best label for explicit ISSUE keys
-  const issueLabels = new Map();
-  for (const item of items) {
-    if (item.reqCandidate.kind === 'issue') {
-      const existing = issueLabels.get(item.reqCandidate.key);
+    } else if (item.reqCandidate.kind === 'issue') {
+      const effectiveKey = item.reqCandidate.scopeByProject
+        ? `${item.projectKey}::${item.reqCandidate.key}`
+        : item.reqCandidate.key;
+      item.effectiveIssueKey = effectiveKey;
+      issueCounts.set(effectiveKey, (issueCounts.get(effectiveKey) || 0) + 1);
+      const existing = issueLabels.get(effectiveKey);
       if (!existing || item.reqCandidate.label.length > existing.length) {
-        issueLabels.set(item.reqCandidate.key, item.reqCandidate.label);
+        issueLabels.set(effectiveKey, item.reqCandidate.label);
       }
     }
   }
@@ -255,16 +308,20 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     let reqKey = 'INBOX';
     let reqLabel = '';
     let reqKind = 'inbox';
+    let reqCount = 1;
     if (item.reqCandidate.kind === 'issue') {
-      reqKey = item.reqCandidate.key;
+      reqKey = item.effectiveIssueKey;
       reqLabel = issueLabels.get(reqKey) || item.reqCandidate.label;
       reqKind = 'issue';
+      reqCount = issueCounts.get(reqKey) || 1;
     } else if (item.reqCandidate.kind === 'theme-candidate') {
-      const count = themeCounts.get(`${item.projectKey}::${item.reqCandidate.key}`) || 0;
+      const scopeKey = `${item.projectKey}::${item.reqCandidate.key}`;
+      const count = themeCounts.get(scopeKey) || 0;
       if (count >= 2) {
-        reqKey = item.reqCandidate.key;
+        reqKey = scopeKey;
         reqLabel = item.reqCandidate.label;
         reqKind = 'theme';
+        reqCount = count;
       }
     }
 
@@ -284,8 +341,8 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     if (item.status === 'running') pSum.running += 1;
     if (item.updatedAtMs > pSum.latestMs) pSum.latestMs = item.updatedAtMs;
 
-    const { reqCandidate, ...rest } = item;
-    return { ...rest, reqKey, reqLabel, reqKind };
+    const { reqCandidate, effectiveIssueKey, ...rest } = item;
+    return { ...rest, reqKey, reqLabel, reqKind, reqCount };
   });
 
   conversations.sort((a, b) => {

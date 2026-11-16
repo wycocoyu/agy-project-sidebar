@@ -110,9 +110,9 @@ def stop_bootstrap_process():
             pass
 
 
-def start_bootstrap_if_needed():
+def start_bootstrap_if_needed(restart_if_running: bool = False):
     owner = read_json(OWNER_FILE, None)
-    if owner and owner.get('tier') == 2 and pid_alive(owner.get('pid')):
+    if not restart_if_running and owner and owner.get('tier') == 2 and pid_alive(owner.get('pid')):
         return 'host-sidecar'
 
     port, token = discover_ls()
@@ -121,20 +121,26 @@ def start_bootstrap_if_needed():
             sidecars = call_ls(port, token, 'GetSidecars', {}).get('sidecars', [])
             entry = next((s for s in sidecars if s.get('sidecarId') == f'{PLUGIN_NAME}/panel'), None)
             if entry:
-                if entry.get('status') == 'SIDECAR_STATUS_RUNNING':
+                was_running = entry.get('status') == 'SIDECAR_STATUS_RUNNING'
+                if was_running and not restart_if_running:
                     return 'host-sidecar'
                 try:
-                    call_ls(port, token, 'ManageSidecar', {'sidecarId': f'{PLUGIN_NAME}/panel', 'action': 'SIDECAR_ACTION_ENABLE'})
+                    if not was_running:
+                        call_ls(port, token, 'ManageSidecar', {'sidecarId': f'{PLUGIN_NAME}/panel', 'action': 'SIDECAR_ACTION_ENABLE'})
                     call_ls(port, token, 'ManageSidecar', {'sidecarId': f'{PLUGIN_NAME}/panel', 'action': 'SIDECAR_ACTION_RESTART'})
-                    time.sleep(1.5)
-                    sidecars2 = call_ls(port, token, 'GetSidecars', {}).get('sidecars', [])
-                    entry2 = next((s for s in sidecars2 if s.get('sidecarId') == f'{PLUGIN_NAME}/panel'), None)
-                    if entry2 and entry2.get('status') == 'SIDECAR_STATUS_RUNNING':
-                        return 'host-sidecar-hot'
+                    for _ in range(10):
+                        time.sleep(0.3)
+                        sidecars2 = call_ls(port, token, 'GetSidecars', {}).get('sidecars', [])
+                        entry2 = next((s for s in sidecars2 if s.get('sidecarId') == f'{PLUGIN_NAME}/panel'), None)
+                        if entry2 and entry2.get('status') == 'SIDECAR_STATUS_RUNNING':
+                            return 'host-sidecar-restarted' if was_running else 'host-sidecar-hot'
                 except Exception:
                     pass
         except Exception:
             pass
+
+    if restart_if_running and owner and owner.get('tier') == 2 and pid_alive(owner.get('pid')):
+        return 'host-sidecar'
 
     stop_bootstrap_process()
     cmd_prefix, env = find_node_runtime()
@@ -179,7 +185,7 @@ def cmd_install():
         else:
             shutil.copy2(src, dst)
     write_json_atomic(SETTINGS_FILE, {'enabled': True})
-    mode = start_bootstrap_if_needed()
+    mode = start_bootstrap_if_needed(restart_if_running=True)
     print(json.dumps({
         'status': 'installed',
         'pluginDir': str(PLUGIN_DIR),
