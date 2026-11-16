@@ -150,13 +150,13 @@ test('Requirement, Status + Requirement, and Requirement + Status produce distin
   const day = 86_400_000;
 
   const sampleConvs = [
-    // Active multi-session #12: 1 running + 1 unread + 2 read idle (plan A progressive fold!)
+    // Active multi-session #12 + clean 'Issue 12' (merges into canonical ISSUE:12 without # in header label!)
     { id: 'r12-run', title: '1115 | 功能 | #12 重试幂等锁实现', projectKey: 'p-ord', statusGroup: 'in_progress', isUnread: false, updatedAtMs: now - 1 * min },
     { id: 'r12-unr', title: '1115 | 设计 | #12 方案评审记录', projectKey: 'p-ord', statusGroup: 'idle', isUnread: true, updatedAtMs: now - 5 * min },
-    { id: 'r12-old1', title: '1114 | 调研 | #12 历史压测日志', projectKey: 'p-ord', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 2 * hour },
+    { id: 'r12-old1', title: '1114 | 调研 | Issue 12 历史压测日志', projectKey: 'p-ord', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 2 * hour },
     { id: 'r12-old2', title: '1113 | 分析 | #12 初版设计草稿', projectKey: 'p-ord', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 1 * day },
 
-    // Single-session unread #3 (now keeps its Requirement group!) + untagged unread s-unr-plain
+    // Single-session unread #3 -> clean label 'LoopForge支持CNB方案' (NO '#3'!) + untagged unread s-unr-plain
     { id: 's-unr-tag', title: '1115 | 设计 | #3 LoopForge支持CNB方案', projectKey: 'p-loop', statusGroup: 'idle', isUnread: true, updatedAtMs: now - 10 * min },
     { id: 's-unr-plain', title: '1115 | 功能 | REA逆向Todos复刻流水线', projectKey: 'p-agent', statusGroup: 'idle', isUnread: true, updatedAtMs: now - 15 * min },
 
@@ -168,14 +168,15 @@ test('Requirement, Status + Requirement, and Requirement + Status produce distin
     { id: 's-now', title: '1115 | 功能 | 拆分agy-project-sidebar插件', projectKey: 'p-coco', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 500 },
     { id: 's-2814', title: '1115 | 调试 | #2814 OpenCLI reply多图排查', projectKey: 'p-coco', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 2 * hour },
 
-    // All-read historical multi-session Q180 (count = 2) -> collapsed by default, sorted below #2814
+    // All-read historical multi-session Q180 (count = 2) -> collapsed by default
     { id: 'q180-1', title: '1113 | 分析 | Q180 需求研读', projectKey: 'p-egg', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 1 * day },
     { id: 'q180-2', title: '1108 | 分析 | Q180 早期调研', projectKey: 'p-egg', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 6 * day },
   ];
 
-  // 1) Status + Requirement: status skeleton + unwrapped untagged rows + requirement groups (including count === 1)
+  // 1) Status + Requirement: status skeleton + unwrapped untagged rows + clean #-free requirement headers
   const itemsSR = buildVirtualItemsForDims(sampleConvs, ['status', 'requirement']);
   assert.equal(itemsSR.some(x => x.type === 'header' && /Standalone/i.test(x.label)), false);
+  assert.equal(itemsSR.some(x => x.type === 'header' && /#/.test(x.label)), false);
 
   const progIdx = itemsSR.findIndex(x => x.id === 'header-status-in-progress');
   const idleIdx = itemsSR.findIndex(x => x.id === 'header-status-idle');
@@ -188,7 +189,7 @@ test('Requirement, Status + Requirement, and Requirement + Status produce distin
   const foldToggle = progSlice.find(x => x.type === 'show-more' && x.groupId.startsWith('agy-fold:'));
   assert.ok(foldToggle && foldToggle.label.includes('2'));
 
-  // Clicking the progressive fold toggle reveals the 2 read idle siblings
+  // Clicking the progressive fold toggle reveals the 2 read idle siblings (including 'Issue 12 历史压测日志')
   const foldKey = foldToggle.groupId.slice('agy-fold:'.length);
   const expandedItems = buildVirtualItemsForDims(sampleConvs, ['status', 'requirement'], {
     expandedReadIdleKeys: [foldKey],
@@ -197,16 +198,16 @@ test('Requirement, Status + Requirement, and Requirement + Status produce distin
   assert.ok(expandedItems.some(x => x.type === 'row' && x.cascadeId === 'r12-old2'));
   assert.ok(expandedItems.some(x => x.type === 'show-more' && x.label.includes('收起')));
 
-  // Idle section: collapsed req headers (#3, MUL-770, #2814, Q180) interleave with unwrapped untagged rows (s-unr-plain, s-now) in isUnread -> latestMs order
+  // Idle section: collapsed req headers interleave with unwrapped untagged rows in isUnread -> latestMs order
   const idleSlice = itemsSR.slice(idleIdx + 1);
   const idxOfHeader = frag => idleSlice.findIndex(x => x.type === 'header' && x.label.includes(frag));
   const idxOfRow = id => idleSlice.findIndex(x => x.type === 'row' && x.id === id);
 
-  const sr3Idx = idxOfHeader('#3');
+  const sr3Idx = idxOfHeader('LoopForge支持CNB方案');
   const srUnrPlainIdx = idxOfRow('s-unr-plain');
   const srM770Idx = idxOfHeader('MUL-770');
   const srNowIdx = idxOfRow('s-now');
-  const sr2814Idx = idxOfHeader('2814');
+  const sr2814Idx = idxOfHeader('OpenCLI reply多图排查');
   const srQ180Idx = idxOfHeader('Q180');
 
   assert.ok(sr3Idx >= 0 && idleSlice[sr3Idx].isCollapsed === true && idleSlice[sr3Idx].count === 1);
@@ -216,18 +217,19 @@ test('Requirement, Status + Requirement, and Requirement + Status produce distin
   assert.ok(sr3Idx < srUnrPlainIdx && srUnrPlainIdx < srM770Idx && srM770Idx < srNowIdx);
   assert.ok(srNowIdx < sr2814Idx && sr2814Idx < srQ180Idx);
 
-  // 2) Requirement only: NO top status headers; top-level req headers on top + collapsed Standalone at bottom for untagged inbox
+  // 2) Requirement only: NO top status headers; #-free req headers on top + collapsed Standalone (with unread indicator) at bottom
   const itemsR = buildVirtualItemsForDims(sampleConvs, ['requirement']);
   assert.equal(itemsR.some(x => x.id === 'header-status-in-progress' || x.id === 'header-status-idle'), false);
-  const r12Hdr = itemsR.find(x => x._agyKind === 'req-header' && x.label.includes('#12'));
-  const r3Hdr = itemsR.find(x => x._agyKind === 'req-header' && x.label.includes('#3'));
-  const r2814Hdr = itemsR.find(x => x._agyKind === 'req-header' && x.label.includes('2814'));
+  assert.equal(itemsR.some(x => x.type === 'header' && /#/.test(x.label)), false);
+  const r12Hdr = itemsR.find(x => x._agyKind === 'req-header' && x.id.includes('ISSUE:12'));
+  const r3Hdr = itemsR.find(x => x._agyKind === 'req-header' && x.label.includes('LoopForge支持CNB方案'));
+  const r2814Hdr = itemsR.find(x => x._agyKind === 'req-header' && x.label.includes('OpenCLI reply多图排查'));
   const rStandaloneHdr = itemsR[itemsR.length - 1];
 
-  assert.ok(r12Hdr && r12Hdr._agyDepth === 0 && r12Hdr.isCollapsed === false);
+  assert.ok(r12Hdr && r12Hdr._agyDepth === 0 && r12Hdr.isCollapsed === false && !r12Hdr.label.includes('#') && r12Hdr.count === 4);
   assert.ok(r3Hdr && r3Hdr._agyDepth === 0 && r3Hdr.isCollapsed === true);
   assert.ok(r2814Hdr && r2814Hdr._agyDepth === 0 && r2814Hdr.isCollapsed === true);
-  assert.ok(rStandaloneHdr && rStandaloneHdr.label === 'Standalone' && rStandaloneHdr.count === 2 && rStandaloneHdr.isCollapsed === true);
+  assert.ok(rStandaloneHdr && rStandaloneHdr.label === 'Standalone' && rStandaloneHdr.count === 2 && rStandaloneHdr._agyUnread === 1 && rStandaloneHdr.isCollapsed === true);
   assert.equal(itemsR.some(x => x.type === 'row' && (x.id === 's-unr-plain' || x.id === 's-now')), false);
 
   const itemsRExp = buildVirtualItemsForDims(sampleConvs, ['requirement'], {
@@ -239,8 +241,8 @@ test('Requirement, Status + Requirement, and Requirement + Status produce distin
   // 3) Requirement + Status: Requirement outer skeleton with nested Status headers inside expanded Requirements
   const itemsRS = buildVirtualItemsForDims(sampleConvs, ['requirement', 'status']);
   assert.notDeepEqual(itemsRS.map(x => x.id), itemsSR.map(x => x.id));
-  const rs12Idx = itemsRS.findIndex(x => x._agyKind === 'req-header' && x.label.includes('#12'));
-  const rs3Idx = itemsRS.findIndex(x => x._agyKind === 'req-header' && x.label.includes('#3'));
+  const rs12Idx = itemsRS.findIndex(x => x._agyKind === 'req-header' && x.id.includes('ISSUE:12'));
+  const rs3Idx = itemsRS.findIndex(x => x._agyKind === 'req-header' && x.label.includes('LoopForge支持CNB方案'));
   assert.ok(rs12Idx === 0 && rs3Idx > rs12Idx);
   const rs12Inner = itemsRS.slice(rs12Idx + 1, rs3Idx);
   const innerProg = rs12Inner.find(x => x._agyKind === 'top-header' && x.label === 'In Progress');

@@ -1,9 +1,39 @@
 module.exports = function mountProjectSidebarWidget(testEnv) {
   const TECH_ID_RE = /^(?:GPT|UTF|SHA|ISO|HTTP|HTTPS|CVE|NODE|PR|V\d+)-\d+$/i;
-  const SHORT_REPO_ISSUE_RE = /^(?:#\d+|PR#\d+)$/i;
   const SESSION_NAME_RE = /^(\d{4})\s*\|\s*([^|]+?)\s*\|\s*(.+)$/;
-  const PREFIX_ISSUE_RE = /^(#[1-9]\d*|[Qq]\d+|PR\s*#?\d+|[A-Za-z][A-Za-z0-9]{1,9}-\d+)\b[\s|:：\-]*(.*)$/;
-  const EMBEDDED_ISSUE_RE = /(?:^|[\s|(\[【])(#[1-9]\d*|[A-Z]{2,10}-\d+|[Qq]\d{2,})\b/;
+  const PREFIX_ISSUE_RE = /^(#[1-9]\d*|Issue\s*#?\s*[1-9]\d*|PR\s*#?\s*[1-9]\d*|[Qq]\d+|[A-Za-z][A-Za-z0-9]{1,9}-\d+)\b[\s|:：\-]*(.*)$/i;
+  const EMBEDDED_ISSUE_RE = /(?:^|[\s|(\[【])(#[1-9]\d*|Issue\s*#?\s*[1-9]\d*|PR\s*#?\s*[1-9]\d*|[A-Z]{2,10}-\d+|[Qq]\d{2,})\b/i;
+  const BRACKET_THEME_RE = /^(?:\[([^\[\]]{2,24})\]|【([^【】]{2,24})】)[\s|:：\-]*(.*)$/;
+
+  function cleanRequirementLabel(rawText, fallback = '') {
+    const cleaned = String(rawText || '')
+      .replace(/\bPR\s*#\s*(\d+)/gi, 'PR $1')
+      .replace(/\bIssue\s*#\s*(\d+)/gi, 'Issue $1')
+      .replace(/\/\s*#\s*(\d+)/g, '/$1')
+      .replace(/([A-Za-z0-9\u4e00-\u9fff])#(\d+)/g, '$1 $2')
+      .replace(/(^|[\s(\[【\-])#(\d+)/g, '$1$2')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    return cleaned || fallback;
+  }
+
+  function normalizeIssueToken(rawToken) {
+    const trimmed = String(rawToken || '').trim();
+    if (trimmed.startsWith('#')) {
+      const num = trimmed.slice(1);
+      return { key: `ISSUE:${num}`, shortId: num, fallbackLabel: `Issue ${num}`, scopeByProject: true, isLeadingHash: true };
+    }
+    let m = trimmed.match(/^Issue\s*#?\s*([1-9]\d*)$/i);
+    if (m) {
+      return { key: `ISSUE:${m[1]}`, shortId: `Issue ${m[1]}`, fallbackLabel: `Issue ${m[1]}`, scopeByProject: true, isLeadingHash: false };
+    }
+    m = trimmed.match(/^PR\s*#?\s*([1-9]\d*)$/i);
+    if (m) {
+      return { key: `PR:${m[1]}`, shortId: `PR ${m[1]}`, fallbackLabel: `PR ${m[1]}`, scopeByProject: true, isLeadingHash: false };
+    }
+    const upper = trimmed.toUpperCase();
+    return { key: `ISSUE:${upper}`, shortId: upper, fallbackLabel: upper, scopeByProject: false, isLeadingHash: false };
+  }
 
   function parseSessionTitle(title) {
     const clean = String(title || '').replace(/\s+/g, ' ').trim();
@@ -28,17 +58,22 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       if (!text) continue;
       const prefixMatch = text.match(PREFIX_ISSUE_RE);
       if (prefixMatch) {
-        const token = prefixMatch[1].replace(/^PR\s*#?/i, 'PR#').replace(/\s+/g, '');
-        const normalizedToken = token.startsWith('#') ? token : token.toUpperCase();
-        if (!TECH_ID_RE.test(normalizedToken)) {
-          const tail = prefixMatch[2].trim();
-          const label = tail ? `${normalizedToken} ${tail}` : normalizedToken;
+        const info = normalizeIssueToken(prefixMatch[1]);
+        if (!TECH_ID_RE.test(info.shortId)) {
+          const rawTail = prefixMatch[2].replace(/^(?:[\s/:：\-]*#\d+\b)+[\s/:：\-]*/g, '').trim();
+          let label;
+          if (info.isLeadingHash) {
+            label = rawTail ? cleanRequirementLabel(rawTail, info.fallbackLabel) : info.fallbackLabel;
+          } else {
+            const combined = rawTail ? `${info.shortId} ${rawTail}` : info.shortId;
+            label = cleanRequirementLabel(combined, info.fallbackLabel);
+          }
           return {
             kind: 'issue',
-            key: `ISSUE:${normalizedToken}`,
-            shortId: normalizedToken,
+            key: info.key,
+            shortId: info.shortId,
             label,
-            scopeByProject: SHORT_REPO_ISSUE_RE.test(normalizedToken),
+            scopeByProject: info.scopeByProject,
           };
         }
       }
@@ -48,25 +83,28 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       if (!text) continue;
       const embMatch = text.match(EMBEDDED_ISSUE_RE);
       if (embMatch) {
-        const token = embMatch[1].startsWith('#') ? embMatch[1] : embMatch[1].toUpperCase();
-        if (!TECH_ID_RE.test(token)) {
+        const info = normalizeIssueToken(embMatch[1]);
+        if (!TECH_ID_RE.test(info.shortId)) {
           return {
             kind: 'issue',
-            key: `ISSUE:${token}`,
-            shortId: token,
-            label: `${token} · ${parsed.subject || text}`,
-            scopeByProject: SHORT_REPO_ISSUE_RE.test(token),
+            key: info.key,
+            shortId: info.shortId,
+            label: cleanRequirementLabel(parsed.subject || text, info.fallbackLabel),
+            scopeByProject: info.scopeByProject,
           };
         }
       }
     }
 
     if (parsed.hasStandardFormat && parsed.subject) {
+      const bracketMatch = parsed.subject.match(BRACKET_THEME_RE);
+      const rawTag = bracketMatch ? (bracketMatch[1] || bracketMatch[2] || '').trim() : '';
+      const themeLabel = cleanRequirementLabel(rawTag || parsed.subject, rawTag || parsed.subject);
       return {
         kind: 'theme-candidate',
-        key: `THEME:${parsed.subject.toLowerCase()}`,
+        key: `THEME:${themeLabel.toLowerCase()}`,
         shortId: '',
-        label: parsed.subject,
+        label: themeLabel,
         scopeByProject: true,
       };
     }
@@ -270,6 +308,35 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     };
   }
 
+  function makeStandaloneHeader(standaloneRows, prefixPath, depth, collapsedSet, t) {
+    const inboxPathKey = prefixPath ? `${prefixPath}/req:INBOX` : 'req:INBOX';
+    const inboxToggleKey = `exp:${inboxPathKey}`;
+    const isCollapsed = !collapsedSet.has(inboxToggleKey);
+    let runningCount = 0;
+    let unreadCount = 0;
+    for (const c of standaloneRows) {
+      if (isActiveConv(c)) runningCount += 1;
+      else if (c.isUnread) unreadCount += 1;
+    }
+    return {
+      inboxPathKey,
+      isCollapsed,
+      header: {
+        type: 'header',
+        id: `header-agy:${inboxPathKey}`,
+        label: t.standalone,
+        count: standaloneRows.length,
+        isCollapsed,
+        _agyKind: 'top-header',
+        _agyIconName: 'folder',
+        _agyDepth: depth,
+        _agyToggleKey: inboxToggleKey,
+        _agyRunning: runningCount,
+        _agyUnread: unreadCount,
+      },
+    };
+  }
+
   function emitClusterGroupItems(out, cluster, gPathKey, depth, bucketKey, opts) {
     const { collapsedSet, expandedReadIdleGroups, activeChatId, t, isHistory } = opts;
     const isIdleBucket = bucketKey === 'idle';
@@ -465,20 +532,14 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     }
 
     if (standaloneRows.length > 0) {
-      const inboxPathKey = prefixPath ? `${prefixPath}/req:INBOX` : 'req:INBOX';
-      const inboxToggleKey = `exp:${inboxPathKey}`;
-      const isInboxCollapsed = !collapsedSet.has(inboxToggleKey);
-      out.push({
-        type: 'header',
-        id: `header-agy:${inboxPathKey}`,
-        label: t.standalone,
-        count: standaloneRows.length,
-        isCollapsed: isInboxCollapsed,
-        _agyKind: 'top-header',
-        _agyIconName: 'folder',
-        _agyDepth: depth,
-        _agyToggleKey: inboxToggleKey,
-      });
+      const { inboxPathKey, isCollapsed: isInboxCollapsed, header } = makeStandaloneHeader(
+        standaloneRows,
+        prefixPath,
+        depth,
+        collapsedSet,
+        t,
+      );
+      out.push(header);
       if (!isInboxCollapsed) {
         const sortedStandalone = [...standaloneRows].sort((a, b) => {
           if (isActiveConv(a) !== isActiveConv(b)) return isActiveConv(a) ? -1 : 1;
@@ -694,20 +755,14 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         out.push(makePageShowMore(pageKey, sortedClusters.length - visible.length, depth, t));
       }
       if (standaloneRows.length > 0) {
-        const inboxPathKey = prefixPath ? `${prefixPath}/req:INBOX` : 'req:INBOX';
-        const inboxToggleKey = `exp:${inboxPathKey}`;
-        const isInboxCollapsed = !collapsedSet.has(inboxToggleKey);
-        out.push({
-          type: 'header',
-          id: `header-agy:${inboxPathKey}`,
-          label: t.standalone,
-          count: standaloneRows.length,
-          isCollapsed: isInboxCollapsed,
-          _agyKind: 'top-header',
-          _agyIconName: 'folder',
-          _agyDepth: depth,
-          _agyToggleKey: inboxToggleKey,
-        });
+        const { inboxPathKey, isCollapsed: isInboxCollapsed, header } = makeStandaloneHeader(
+          standaloneRows,
+          prefixPath,
+          depth,
+          collapsedSet,
+          t,
+        );
+        out.push(header);
         if (!isInboxCollapsed) {
           out.push(...emitGenericDims(standaloneRows, restDims, inboxPathKey, depth + 1, opts));
         }
@@ -1462,6 +1517,28 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
     const padLeft = 4 + Math.min(item._agyDepth || 0, 4) * 14;
     const iconPath = ICON_PATHS[item._agyIconName] || ICON_PATHS.folder;
+    const topRightEl = (item._agyRunning || 0) > 0
+      ? h(
+          'span',
+          { className: 'ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
+          h(
+            'span',
+            { className: 'agy-native-spinner', title: 'Working' },
+            h('span', null),
+            h('span', null),
+            h('span', null),
+            h('span', null),
+          ),
+          h('span', null, `${item._agyRunning}/${item.count ?? ''}`),
+        )
+      : ((item._agyUnread || 0) > 0
+          ? h(
+              'span',
+              { className: 'ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
+              h('span', { className: 'agy-native-unread', title: 'Unread' }),
+              h('span', null, String(item.count ?? '')),
+            )
+          : h('span', { className: 'ml-2 shrink-0 text-xs opacity-60 tabular-nums' }, String(item.count ?? '')));
     return h(
       'div',
       { className: 'relative w-full group/header' },
@@ -1492,7 +1569,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
           ),
           h('span', { className: 'truncate font-medium text-[13px]' }, item.label),
         ),
-        h('span', { className: 'ml-2 shrink-0 text-xs opacity-60 tabular-nums' }, String(item.count ?? '')),
+        topRightEl,
       ),
     );
   }

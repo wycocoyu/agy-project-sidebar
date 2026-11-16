@@ -40,10 +40,19 @@ test('filterRealProjects excludes sidecar virtual projects and preserves local f
   assert.deepEqual(filtered[0].folderPaths, ['/Users/mac/dev/cocoyuworkspace']);
 });
 
-test('extractRequirementDescriptor recognizes issue IDs without misclassifying tech tokens', () => {
+test('extractRequirementDescriptor recognizes issue IDs without # in labels and without misclassifying tech tokens', () => {
   assert.equal(extractRequirementDescriptor('1115 | 设计 | MUL-797 通用Runner实现').key, 'ISSUE:MUL-797');
-  assert.equal(extractRequirementDescriptor('#41 优化需求文件夹视觉区分度').key, 'ISSUE:#41');
+  const h41 = extractRequirementDescriptor('#41 优化需求文件夹视觉区分度');
+  assert.equal(h41.key, 'ISSUE:41');
+  assert.equal(h41.label, '优化需求文件夹视觉区分度');
+  assert.equal(extractRequirementDescriptor('1115 | 功能 | Issue 41 需求视觉对齐').key, 'ISSUE:41');
+  assert.equal(extractRequirementDescriptor('#88').label, 'Issue 88');
+  assert.equal(extractRequirementDescriptor('DeerFlow #7881 #6751 复现').label, 'DeerFlow 7881 6751 复现');
   assert.equal(extractRequirementDescriptor('Q137 排查线上延时').key, 'ISSUE:Q137');
+
+  const bracket = extractRequirementDescriptor('1115 | 功能 | 【看板】状态分组重构');
+  assert.equal(bracket.kind, 'theme-candidate');
+  assert.equal(bracket.key, 'THEME:看板');
 
   const gpt = extractRequirementDescriptor('1115 | 优化 | GPT-6 路由验证');
   assert.equal(gpt.kind, 'theme-candidate');
@@ -156,15 +165,17 @@ test('buildSidebarSnapshot scopes numeric #N / PR#N per project while keeping MU
   const snap = buildSidebarSnapshot({ rawProjects, rows });
   const byId = Object.fromEntries(snap.conversations.map(c => [c.id, c]));
 
-  assert.equal(byId['l-3'].reqKey, 'p-loop::ISSUE:#3');
+  assert.equal(byId['l-3'].reqKey, 'p-loop::ISSUE:3');
   assert.equal(byId['l-3'].reqCount, 1);
-  assert.equal(byId['l-3'].reqLabel, '#3 LoopForge支持CNB方案');
+  assert.equal(byId['l-3'].reqLabel, 'LoopForge支持CNB方案');
 
-  assert.equal(byId['c-3'].reqKey, 'p-coco::ISSUE:#3');
+  assert.equal(byId['c-3'].reqKey, 'p-coco::ISSUE:3');
   assert.equal(byId['c-3'].reqCount, 1);
-  assert.match(byId['c-3'].reqLabel, /#3/);
+  assert.equal(byId['c-3'].reqLabel, 'Claude与CLI1.5适配');
+  assert.equal(byId['c-3'].reqLabel.includes('#'), false);
 
   assert.notEqual(byId['l-pr12'].reqKey, byId['c-pr12'].reqKey);
+  assert.equal(byId['l-pr12'].reqLabel, 'PR 12 fix ci');
   assert.equal(byId['m-1'].reqKey, 'ISSUE:MUL-797');
   assert.equal(byId['m-2'].reqKey, 'ISSUE:MUL-797');
   assert.equal(byId['m-1'].reqCount, 2);
