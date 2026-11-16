@@ -308,10 +308,35 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     };
   }
 
-  function makeStandaloneHeader(standaloneRows, prefixPath, depth, collapsedSet, t) {
+  function resolveHeaderCollapse(items, toggleKey, defaultCollapsed, opts) {
+    const baseCollapsed = defaultCollapsed ? !opts.collapsedSet.has(toggleKey) : opts.collapsedSet.has(toggleKey);
+    if (!baseCollapsed || !opts?._revealOut || !Array.isArray(items) || !items.some(opts._revealMatchFn)) {
+      return baseCollapsed;
+    }
+    opts._revealOut.toggleOps.push({ toggleKey, action: defaultCollapsed ? 'add' : 'delete' });
+    if (defaultCollapsed) opts.collapsedSet.add(toggleKey);
+    else opts.collapsedSet.delete(toggleKey);
+    return false;
+  }
+
+  function sliceWithReveal(list, baseLimit, pageKey, matcherFn, opts) {
+    const rawLimit = !opts.isHistory ? (opts.expandedLimits[pageKey] || baseLimit) : list.length;
+    const head = list.slice(0, rawLimit);
+    if (!opts?._revealOut || head.some(matcherFn)) {
+      return head;
+    }
+    const idx = list.findIndex(matcherFn);
+    if (idx < 0 || idx < rawLimit) return head;
+    const raised = idx + 15;
+    opts._revealOut.limitPatches[pageKey] = raised;
+    opts.expandedLimits[pageKey] = raised;
+    return list.slice(0, raised);
+  }
+
+  function makeStandaloneHeader(standaloneRows, prefixPath, depth, opts) {
     const inboxPathKey = prefixPath ? `${prefixPath}/req:INBOX` : 'req:INBOX';
     const inboxToggleKey = `exp:${inboxPathKey}`;
-    const isCollapsed = !collapsedSet.has(inboxToggleKey);
+    const isCollapsed = resolveHeaderCollapse(standaloneRows, inboxToggleKey, true, opts);
     let runningCount = 0;
     let unreadCount = 0;
     for (const c of standaloneRows) {
@@ -324,7 +349,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       header: {
         type: 'header',
         id: `header-agy:${inboxPathKey}`,
-        label: t.standalone,
+        label: opts.t.standalone,
         count: standaloneRows.length,
         isCollapsed,
         _agyKind: 'top-header',
@@ -338,11 +363,11 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   function emitClusterGroupItems(out, cluster, gPathKey, depth, bucketKey, opts) {
-    const { collapsedSet, expandedReadIdleGroups, activeChatId, t, isHistory } = opts;
+    const { expandedReadIdleGroups, activeChatId, t, isHistory } = opts;
     const isIdleBucket = bucketKey === 'idle';
     const defaultCollapsed = isIdleBucket;
     const toggleKey = defaultCollapsed ? `exp:${gPathKey}` : `col:${gPathKey}`;
-    const isCollapsed = defaultCollapsed ? !collapsedSet.has(toggleKey) : collapsedSet.has(toggleKey);
+    const isCollapsed = resolveHeaderCollapse(cluster.items, toggleKey, defaultCollapsed, opts);
 
     out.push({
       type: 'header',
@@ -377,7 +402,12 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         out.push({ type: 'row', id: it.id, cascadeId: it.id, isIndented: true, groupId: childGroupId });
       }
       if (foldedReadIdle.length > 0) {
-        const foldExpanded = expandedReadIdleGroups.has(gPathKey);
+        let foldExpanded = expandedReadIdleGroups.has(gPathKey);
+        if (!foldExpanded && opts?._revealOut && foldedReadIdle.some(opts._revealMatchFn)) {
+          opts._revealOut.readIdleKeys.push(gPathKey);
+          expandedReadIdleGroups.add(gPathKey);
+          foldExpanded = true;
+        }
         if (foldExpanded) {
           for (const it of foldedReadIdle) {
             out.push({ type: 'row', id: it.id, cascadeId: it.id, isIndented: true, groupId: childGroupId });
@@ -590,11 +620,11 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   function buildInboxSectionItems(inboxEntries, snoozedEntries, opts) {
-    const { collapsedSet, expandedLimits, t, isHistory } = opts;
+    const { t } = opts;
     const out = [];
 
     const inboxToggleKey = 'col:inbox';
-    const isInboxCollapsed = collapsedSet.has(inboxToggleKey);
+    const isInboxCollapsed = resolveHeaderCollapse(inboxEntries.map(e => e.conv), inboxToggleKey, false, opts);
     const inboxUnreadCount = inboxEntries.filter(e => Boolean(e.conv.isUnread) || Boolean(e.cls.isWoke) || Boolean(e.cls.isManualUnread)).length;
 
     out.push({
@@ -612,9 +642,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     });
 
     if (!isInboxCollapsed && inboxEntries.length > 0) {
-      const pageKey = 'inbox:list';
-      const limit = !isHistory ? (expandedLimits[pageKey] || 40) : inboxEntries.length;
-      const visible = inboxEntries.slice(0, limit);
+      const visible = sliceWithReveal(inboxEntries, 40, 'inbox:list', e => opts?._revealMatchFn?.(e.conv), opts);
       for (const e of visible) {
         out.push({
           type: 'row',
@@ -638,7 +666,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
     if (snoozedEntries.length > 0) {
       const snoozeToggleKey = 'exp:inbox:snoozed';
-      const isSnoozeCollapsed = !collapsedSet.has(snoozeToggleKey);
+      const isSnoozeCollapsed = resolveHeaderCollapse(snoozedEntries.map(e => e.conv), snoozeToggleKey, true, opts);
       out.push({
         type: 'header',
         id: 'header-inbox-snoozed',
@@ -653,9 +681,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       });
 
       if (!isSnoozeCollapsed) {
-        const sPageKey = 'inbox:snoozed';
-        const sLimit = !isHistory ? (expandedLimits[sPageKey] || 40) : snoozedEntries.length;
-        const sVisible = snoozedEntries.slice(0, sLimit);
+        const sVisible = sliceWithReveal(snoozedEntries, 40, 'inbox:snoozed', e => opts?._revealMatchFn?.(e.conv), opts);
         for (const e of sVisible) {
           out.push({
             type: 'row',
@@ -733,7 +759,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
       const statusPathKey = prefixPath ? `${prefixPath}/status:${bKey}` : `status:${bKey}`;
       const statusToggleKey = `col:${statusPathKey}`;
-      const isStatusCollapsed = collapsedSet.has(statusToggleKey);
+      const bucketConvs = bucket.entries.flatMap(e => (e.kind === 'single' ? [e.conv] : e.items));
+      const isStatusCollapsed = resolveHeaderCollapse(bucketConvs, statusToggleKey, false, opts);
 
       out.push({
         type: 'header',
@@ -750,8 +777,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
       if (isStatusCollapsed) continue;
 
-      const limit = bKey === 'idle' && !isHistory ? (expandedLimits[statusPathKey] || 40) : bucket.entries.length;
-      let visible = bucket.entries.slice(0, limit);
+      let visible = bKey === 'idle' && !isHistory
+        ? sliceWithReveal(bucket.entries, 40, statusPathKey, e => (e.kind === 'single' ? opts?._revealMatchFn?.(e.conv) : e.items.some(opts?._revealMatchFn || (() => false))), opts)
+        : bucket.entries;
       if (bucket.entries.length > visible.length && opts.activeChatId) {
         const hasActive = visible.some(e => e.kind === 'single' ? e.conv.id === opts.activeChatId : e.items.some(it => it.id === opts.activeChatId));
         if (!hasActive) {
@@ -797,13 +825,12 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   function buildRequirementOnlyItems(convs, prefixPath, depth, opts) {
-    const { collapsedSet, expandedLimits, t, isHistory } = opts;
+    const { t } = opts;
     const { clusters, standaloneRows } = buildReqClusters(convs);
     const sortedClusters = sortReqClusters(clusters);
 
     const pageKey = prefixPath || 'root:requirement';
-    const limit = !isHistory ? (expandedLimits[pageKey] || 40) : sortedClusters.length;
-    const visible = sortedClusters.slice(0, limit);
+    const visible = sliceWithReveal(sortedClusters, 40, pageKey, c => c.items.some(opts?._revealMatchFn || (() => false)), opts);
 
     const out = [];
     for (const cluster of visible) {
@@ -820,8 +847,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         standaloneRows,
         prefixPath,
         depth,
-        collapsedSet,
-        t,
+        opts,
       );
       out.push(header);
       if (!isInboxCollapsed) {
@@ -830,8 +856,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
           if (Boolean(a.isUnread) !== Boolean(b.isUnread)) return a.isUnread ? -1 : 1;
           return (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
         });
-        const inboxLimit = !isHistory ? (expandedLimits[inboxPathKey] || 40) : sortedStandalone.length;
-        const visStandalone = sortedStandalone.slice(0, inboxLimit);
+        const visStandalone = sliceWithReveal(sortedStandalone, 40, inboxPathKey, opts?._revealMatchFn, opts);
         const childGroupId = `agy-nested-d${Math.min(Math.max(depth, 1), 3)}:${inboxPathKey}`;
         for (const c of visStandalone) {
           out.push({
@@ -951,7 +976,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   function emitGenericDims(convs, dims, prefixPath, depth, opts) {
-    const { collapsedSet, expandedLimits, t, isHistory } = opts;
+    const { t } = opts;
     if (dims.length === 0) {
       const sorted = [...convs].sort((a, b) => {
         if (isActiveConv(a) !== isActiveConv(b)) return isActiveConv(a) ? -1 : 1;
@@ -959,8 +984,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         return (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
       });
       const key = prefixPath || 'root:none';
-      const limit = !isHistory ? (expandedLimits[key] || 60) : sorted.length;
-      const visible = sorted.slice(0, limit);
+      const visible = sliceWithReveal(sorted, 60, key, opts?._revealMatchFn, opts);
       const out = visible.map(c => ({
         type: 'row',
         id: c.id,
@@ -994,7 +1018,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       for (const b of buckets) {
         const pathKey = prefixPath ? `${prefixPath}/${b.key}` : b.key;
         const toggleKey = `col:${pathKey}`;
-        const isCollapsed = collapsedSet.has(toggleKey);
+        const isCollapsed = resolveHeaderCollapse(b.items, toggleKey, false, opts);
         out.push({
           type: 'header',
           id: `header-agy:${pathKey}`,
@@ -1022,14 +1046,13 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       const { clusters, standaloneRows } = buildReqClusters(convs);
       const sortedClusters = sortReqClusters(clusters);
       const pageKey = prefixPath ? `${prefixPath}/req:groups` : 'root:requirement';
-      const limit = !isHistory ? (expandedLimits[pageKey] || 40) : sortedClusters.length;
-      const visible = sortedClusters.slice(0, limit);
+      const visible = sliceWithReveal(sortedClusters, 40, pageKey, c => c.items.some(opts?._revealMatchFn || (() => false)), opts);
       const out = [];
       for (const cluster of visible) {
         const gPathKey = prefixPath ? `${prefixPath}/req:${cluster.reqKey}` : `req:${cluster.reqKey}`;
         const defaultCollapsed = cluster.highestStatus === 'idle';
         const toggleKey = defaultCollapsed ? `exp:${gPathKey}` : `col:${gPathKey}`;
-        const isCollapsed = defaultCollapsed ? !collapsedSet.has(toggleKey) : collapsedSet.has(toggleKey);
+        const isCollapsed = resolveHeaderCollapse(cluster.items, toggleKey, defaultCollapsed, opts);
         out.push(makeReqClusterHeader(cluster, gPathKey, depth, isCollapsed, toggleKey));
         if (!isCollapsed) {
           out.push(...emitGenericDims(cluster.items, restDims, gPathKey, depth + 1, opts));
@@ -1043,8 +1066,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
           standaloneRows,
           prefixPath,
           depth,
-          collapsedSet,
-          t,
+          opts,
         );
         out.push(header);
         if (!isInboxCollapsed) {
@@ -1067,7 +1089,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       }
       const pathKey = prefixPath ? `${prefixPath}/${b.key}` : b.key;
       const toggleKey = `col:${pathKey}`;
-      const isCollapsed = collapsedSet.has(toggleKey);
+      const isCollapsed = resolveHeaderCollapse(b.items, toggleKey, false, opts);
       out.push({
         type: 'header',
         id: depth === 0 && b.nativeId ? `header-${b.nativeId}` : `header-agy:${pathKey}`,
@@ -1087,8 +1109,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
           if (Boolean(a.isUnread) !== Boolean(b2.isUnread)) return a.isUnread ? -1 : 1;
           return (b2.updatedAtMs || 0) - (a.updatedAtMs || 0);
         });
-        const limit = !isHistory && (b.isFallback || sorted.length > 40) ? (expandedLimits[pathKey] || 40) : sorted.length;
-        const visible = sorted.slice(0, limit);
+        const baseLimit = !opts.isHistory && (b.isFallback || sorted.length > 40) ? 40 : sorted.length;
+        const visible = sliceWithReveal(sorted, baseLimit, pathKey, opts?._revealMatchFn, opts);
         const childGroupId = depth > 0 ? `agy-nested-d${Math.min(depth, 3)}:${pathKey}` : (b.nativeId || `agy:${pathKey}`);
         for (const c of visible) {
           out.push({
@@ -1140,15 +1162,18 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     const dimList = dims || [];
 
     const inboxPrefs = opts.inbox && opts.inbox.enabled !== false && !isHistory ? opts.inbox : null;
+    const sharedOpts = {
+      collapsedSet,
+      expandedReadIdleGroups,
+      expandedLimits,
+      activeChatId,
+      isHistory,
+      t,
+      _revealMatchFn: opts._revealMatchFn,
+      _revealOut: opts._revealOut,
+    };
     if (!inboxPrefs) {
-      return emitGenericDims(scoped, dimList, '', 0, {
-        collapsedSet,
-        expandedReadIdleGroups,
-        expandedLimits,
-        activeChatId,
-        isHistory,
-        t,
-      });
+      return emitGenericDims(scoped, dimList, '', 0, sharedOpts);
     }
 
     const nowMs = Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now();
@@ -1157,36 +1182,58 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       for (const [k, v] of metaById.entries()) opts.outMetaById.set(k, v);
     }
 
-    const inboxItems = buildInboxSectionItems(inboxEntries, snoozedEntries, {
-      collapsedSet,
-      expandedLimits,
-      t,
-      isHistory,
-    });
+    const inboxItems = buildInboxSectionItems(inboxEntries, snoozedEntries, sharedOpts);
 
     if (dimList[0] === 'status') {
       return emitGenericDims(remainingConvs, dimList, '', 0, {
-        collapsedSet,
-        expandedReadIdleGroups,
-        expandedLimits,
-        activeChatId,
-        isHistory,
-        t,
+        ...sharedOpts,
         _inboxItemsBeforeIdle: inboxItems,
       });
     }
 
     return [
       ...inboxItems,
-      ...emitGenericDims(remainingConvs, dimList, '', 0, {
-        collapsedSet,
-        expandedReadIdleGroups,
-        expandedLimits,
-        activeChatId,
-        isHistory,
-        t,
-      }),
+      ...emitGenericDims(remainingConvs, dimList, '', 0, sharedOpts),
     ];
+  }
+
+  function resolveRevealPlan(convs, dims, targetId, opts = {}) {
+    if (!targetId) return { found: false, reason: 'no-target' };
+    const revealOut = { toggleOps: [], limitPatches: {}, readIdleKeys: [] };
+    const items = buildVirtualItemsForDims(convs, dims, {
+      ...opts,
+      collapsedSet: new Set(opts.collapsedSet instanceof Set ? opts.collapsedSet : (opts.collapsedKeys || [])),
+      expandedReadIdleGroups: new Set(opts.expandedReadIdleGroups instanceof Set ? opts.expandedReadIdleGroups : (opts.expandedReadIdleKeys || [])),
+      expandedLimits: { ...(opts.expandedLimits || {}) },
+      _revealMatchFn: c => c?.id === targetId,
+      _revealOut: revealOut,
+    });
+    const virtualIndex = items.findIndex(it => it?.type === 'row' && (it.cascadeId === targetId || it.id === targetId));
+    if (virtualIndex < 0) {
+      return { found: false, reason: 'not-in-list', items };
+    }
+    const trail = [];
+    let minDepth = Infinity;
+    for (let i = virtualIndex - 1; i >= 0; i -= 1) {
+      const it = items[i];
+      if (it?.type === 'header') {
+        const d = Number.isFinite(it._agyDepth) ? it._agyDepth : 0;
+        if (d < minDepth) {
+          trail.unshift(it.label);
+          minDepth = d;
+          if (d === 0) break;
+        }
+      }
+    }
+    return {
+      found: true,
+      virtualIndex,
+      trail,
+      toggleOps: revealOut.toggleOps,
+      limitPatches: revealOut.limitPatches,
+      readIdleKeys: revealOut.readIdleKeys,
+      items,
+    };
   }
 
   if (testEnv && testEnv.__unitTestOnly) {
@@ -1199,6 +1246,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       classifyInboxConversation,
       partitionInboxBuckets,
       buildVirtualItemsForDims,
+      resolveRevealPlan,
     };
   }
 
@@ -1228,12 +1276,15 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     check: 'M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z',
     push_pin: 'm640-480 80 80v80H520v240l-40 40-40-40v-240H240v-80l80-80v-280h-40v-80h400v80h-40v280Zm-286 0h252l-46-46v-314H400v314l-46 46Zm126 0Z',
     wake: 'M380-240 240-380l56-56 84 84 224-224 56 56-280 280ZM480-80q-75 0-140.5-28.5t-114-77q-48.5-48.5-77-114T120-440q0-75 28.5-140.5t77-114q48.5-48.5 114-77T480-880q75 0 140.5 28.5t114 77q48.5 48.5 77 114T840-440q0 75-28.5 140.5t-77 114q-48.5 48.5-114 77T480-80Zm0-80q116 0 198-82t82-198q0-116-82-198t-198-82q-116 0-198 82t-82 198q0 116 82 198t198 82ZM224-854l56 56-170 170-56-56 170-170Zm512 0 170 170-56 56-170-170 56-56Z',
+    my_location: 'M440-42v-80q-125-14-214.5-103.5T122-440H42v-80h80q14-125 103.5-214.5T440-838v-80h80v80q125 14 214.5 103.5T838-520h80v80h-80q-14 125-103.5 214.5T520-122v80h-80Zm40-158q116 0 198-82t82-198q0-116-82-198t-198-82q-116 0-198 82t-82 198q0 116 82 198t198 82Zm0-120q-66 0-113-47t-47-113q0-66 47-113t113-47q66 0 113 47t47 113q0 66-47 113t-113 47Zm0-80q33 0 56.5-23.5T560-480q0-33-23.5-56.5T480-560q-33 0-56.5 23.5T400-480q0 33 23.5 56.5T480-400Z',
   };
 
   const MENU_INBOX_TOGGLE_ID = 'agy-menu-inbox-toggle';
   const MENU_INBOX_RETIRE_ID = 'agy-menu-inbox-retire';
   const SNOOZE_POPOVER_ID = 'agy-inbox-snooze-popover';
   const INBOX_TOAST_ID = 'agy-inbox-toast';
+  const REVEAL_BTN_ID = 'agy-reveal-sidebar-btn';
+  const REVEAL_FLASH_CLASS = 'agy-reveal-flash';
 
   const getI18n = lang => {
     const raw = typeof window.__agyProjectSidebarI18nFactory === 'function'
@@ -1276,6 +1327,12 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       showMore: raw.showMore || 'Show more',
       expandReadIdle: raw.expandReadIdle || '▸ 展开其余 {n} 条已读空闲会话',
       collapseReadIdle: raw.collapseReadIdle || '▾ 收起 {n} 条已读空闲会话',
+      revealLabel: raw.revealLabel || '定位',
+      revealTooltip: raw.revealTooltip || '在左侧边栏定位当前会话',
+      revealLocated: raw.revealLocated || '已定位：',
+      revealPinned: raw.revealPinned || '当前会话位于顶部 Pinned 置顶区',
+      revealNotFound: raw.revealNotFound || '当前列表未找到该会话（可能已归档）',
+      revealNoChat: raw.revealNoChat || '请先打开一个会话',
     };
   };
 
@@ -1540,6 +1597,51 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   background: var(--secondary, rgba(10,10,12,0.07));
   color: var(--foreground, #000000);
 }
+#${REVEAL_BTN_ID} {
+  -webkit-app-region: no-drag !important;
+  app-region: no-drag !important;
+  position: relative;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+  background: var(--secondary, rgba(10, 10, 12, 0.04));
+  color: var(--muted-foreground, #71717a);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+#${REVEAL_BTN_ID}:hover {
+  background: var(--secondary, rgba(10,10,12,0.09));
+  color: var(--foreground, #18181b);
+  border-color: var(--border, rgba(0, 0, 0, 0.18));
+}
+@keyframes agyRevealPulse {
+  0% {
+    box-shadow: inset 0 0 0 2px rgba(59, 130, 246, 0.95);
+    background-color: rgba(59, 130, 246, 0.20);
+  }
+  70% {
+    box-shadow: inset 0 0 0 1.5px rgba(59, 130, 246, 0.55);
+    background-color: rgba(59, 130, 246, 0.10);
+  }
+  100% {
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0);
+    background-color: transparent;
+  }
+}
+.${REVEAL_FLASH_CLASS} {
+  border-radius: 8px;
+  animation: agyRevealPulse 1.8s ease-out forwards;
+}
 `;
 
   function ensureStyle() {
@@ -1601,10 +1703,18 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     inboxMetaById: new Map(),
     convById: new Map(),
     toastTimer: null,
+    flashTimer: null,
+    revealSeq: 0,
     popoverState: null,
     refreshTick: 0,
     prefsSeq: 0,
     triggerRefresh: null,
+    lastRawProps: null,
+    lastMainHdr: null,
+    lastPrefixItems: [],
+    lastLiveConvs: [],
+    lastRenderedItems: [],
+    lastNativeItems: [],
   };
 
   const RETIRE_CYCLE = [12, 24, 48, 168];
@@ -1685,7 +1795,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     document.getElementById(INBOX_TOAST_ID)?.remove();
   }
 
-  function showUndoToast(message, undoPatch) {
+  function showSidebarToast(message, undoPatch = null, durationMs = undoPatch ? 5000 : 2800) {
     clearUndoToast();
     const listEl = document.querySelector('[data-testid="conversation-list-sidebar"]');
     const rect = listEl?.getBoundingClientRect?.();
@@ -1703,24 +1813,28 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       toast.style.minWidth = '220px';
     }
 
-    const textSpan = el('span', 'truncate', message);
-    const undoBtn = el('button', 'agy-inbox-undo-btn', t.undo);
-    undoBtn.type = 'button';
-    undoBtn.setAttribute('data-testid', 'agy-inbox-undo-button');
-    undoBtn.addEventListener('click', ev => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      clearUndoToast();
-      void updatePrefs(undoPatch);
-    });
-
-    toast.appendChild(textSpan);
-    toast.appendChild(undoBtn);
+    toast.appendChild(el('span', 'truncate', message));
+    if (undoPatch) {
+      const undoBtn = el('button', 'agy-inbox-undo-btn', t.undo);
+      undoBtn.type = 'button';
+      undoBtn.setAttribute('data-testid', 'agy-inbox-undo-button');
+      undoBtn.addEventListener('click', ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        clearUndoToast();
+        void updatePrefs(undoPatch);
+      });
+      toast.appendChild(undoBtn);
+    }
     document.body.appendChild(toast);
 
     state.toastTimer = setTimeout(() => {
       clearUndoToast();
-    }, 5000);
+    }, durationMs);
+  }
+
+  function showUndoToast(message, undoPatch) {
+    showSidebarToast(message, undoPatch, 5000);
   }
 
   function settleConversation(id) {
@@ -2570,9 +2684,13 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     if (typeof rawProps?.onFocusGroupId === 'function') {
       state.triggerRefresh = rawProps.onFocusGroupId;
     }
+    state.lastRawProps = rawProps;
     if (!origUMcFn) return null;
 
     if (!shouldRenderCustomGrouping() || !Array.isArray(rawProps?.items)) {
+      state.lastPrefixItems = [];
+      state.lastNativeItems = Array.isArray(rawProps?.items) ? rawProps.items : [];
+      state.lastRenderedItems = state.lastNativeItems;
       return origUMcFn(rawProps);
     }
 
@@ -2584,8 +2702,11 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       );
       const prefixItems = mainIdx >= 0 ? rawProps.items.slice(0, mainIdx + 1) : [];
       const mainHdr = mainIdx >= 0 ? rawProps.items[mainIdx] : null;
+      state.lastPrefixItems = prefixItems;
+      state.lastMainHdr = mainHdr;
 
       if (mainHdr?.isCollapsed) {
+        state.lastRenderedItems = prefixItems;
         return origUMcFn({ ...rawProps, items: prefixItems });
       }
 
@@ -2596,6 +2717,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
       const archivedOnly = /\(Archived\)/i.test(mainHdr?.title || '') || Boolean(state.prefs.showArchived);
       const liveConvs = buildLiveConversations(patchedFiber, rawProps.items, excludedIds, archivedOnly);
+      state.lastLiveConvs = liveConvs;
       state.convById = new Map(liveConvs.map(c => [c.id, c]));
 
       const t = getI18n(state.prefs.language);
@@ -2655,9 +2777,12 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         return origTogglePagination?.(groupId);
       };
 
+      const finalItems = [...prefixItems, ...styledItems];
+      state.lastRenderedItems = finalItems;
+
       return origUMcFn({
         ...rawProps,
-        items: [...prefixItems, ...styledItems],
+        items: finalItems,
         customHeaderRenderer: wrappedHeaderRenderer,
         onTogglePagination: wrappedTogglePagination,
       });
@@ -2797,6 +2922,245 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   let syncScheduled = false;
+  function clearRevealFlash() {
+    if (state.flashTimer) {
+      clearTimeout(state.flashTimer);
+      state.flashTimer = null;
+    }
+    for (const node of document.querySelectorAll(`.${REVEAL_FLASH_CLASS}`)) {
+      node.classList.remove(REVEAL_FLASH_CLASS);
+    }
+  }
+
+  function findSidebarScroller(listEl) {
+    let cur = listEl;
+    while (cur && cur !== document.body) {
+      const style = window.getComputedStyle(cur);
+      if (style.overflowY === 'auto' || style.overflowY === 'scroll' || cur.scrollHeight > cur.clientHeight + 20) {
+        return cur;
+      }
+      cur = cur.parentElement;
+    }
+    return listEl;
+  }
+
+  function estimateItemTopPx(items, targetIdx) {
+    let top = 0;
+    const end = Math.min(targetIdx, items.length);
+    for (let i = 0; i < end; i += 1) {
+      const type = items[i]?.type;
+      if (type === 'section-header') top += 28;
+      else if (type === 'header') top += 37;
+      else if (type === 'show-more') top += 34;
+      else top += 49;
+    }
+    return top;
+  }
+
+  function waitNextFrame() {
+    return new Promise(resolve => requestAnimationFrame(resolve));
+  }
+
+  async function ensureSidebarVisible() {
+    const isListVisible = () => {
+      const listEl = document.querySelector('[data-testid="conversation-list-sidebar"]');
+      const rect = listEl?.getBoundingClientRect?.();
+      return Boolean(listEl && rect && rect.width > 40);
+    };
+    if (isListVisible()) return true;
+    const toggleBtn = document.querySelector('[aria-label="Toggle Sidebar"]');
+    if (!toggleBtn) return false;
+    toggleBtn.click();
+    for (let i = 0; i < 36; i += 1) {
+      await waitNextFrame();
+      if (isListVisible()) return true;
+    }
+    return isListVisible();
+  }
+
+  async function scrollToListIndexAndFlash(targetIdx, itemsList, seq) {
+    await waitNextFrame();
+    await waitNextFrame();
+    if (state.revealSeq !== seq) return false;
+    const listEl = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    if (!listEl) return false;
+    const scroller = findSidebarScroller(listEl);
+    if (!scroller) return false;
+
+    const estY = estimateItemTopPx(itemsList || [], targetIdx);
+    const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    scroller.scrollTop = Math.min(maxTop, Math.max(0, estY - scroller.clientHeight * 0.42));
+
+    let targetWrap = null;
+    for (let attempt = 0; attempt < 18; attempt += 1) {
+      await waitNextFrame();
+      if (state.revealSeq !== seq) return false;
+      targetWrap = listEl.querySelector(`[data-index="${targetIdx}"]`);
+      if (targetWrap) break;
+      const mounted = [...listEl.querySelectorAll('[data-index]')];
+      if (!mounted.length) continue;
+      const indices = mounted.map(n => Number(n.getAttribute('data-index'))).filter(Number.isFinite);
+      const minIdx = Math.min(...indices);
+      const maxIdx = Math.max(...indices);
+      if (targetIdx < minIdx) {
+        scroller.scrollTop = Math.max(0, scroller.scrollTop - Math.max(80, (minIdx - targetIdx) * 44));
+      } else if (targetIdx > maxIdx) {
+        scroller.scrollTop = Math.min(scroller.scrollHeight, scroller.scrollTop + Math.max(80, (targetIdx - maxIdx) * 44));
+      }
+    }
+
+    if (!targetWrap) return false;
+    targetWrap.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    clearRevealFlash();
+    const flashEl = targetWrap.firstElementChild || targetWrap;
+    flashEl.classList.add(REVEAL_FLASH_CLASS);
+    state.flashTimer = setTimeout(() => {
+      flashEl.classList.remove(REVEAL_FLASH_CLASS);
+      state.flashTimer = null;
+    }, 1850);
+    return true;
+  }
+
+  function applyRevealOpsAndRender(plan) {
+    for (const [k, v] of Object.entries(plan.limitPatches || {})) {
+      state.expandedLimits[k] = Math.max(state.expandedLimits[k] || 0, v);
+    }
+    for (const key of plan.readIdleKeys || []) {
+      state.expandedReadIdleGroups.add(key);
+    }
+    if (plan.toggleOps?.length) {
+      const nextSet = new Set(state.prefs.collapsedGroupKeys || []);
+      for (const op of plan.toggleOps) {
+        if (op.action === 'add') nextSet.add(op.toggleKey);
+        else nextSet.delete(op.toggleKey);
+      }
+      void updatePrefs({ collapsedGroupKeys: [...nextSet] });
+      return;
+    }
+    requestReactRefresh();
+  }
+
+  async function revealActiveConversation() {
+    const seq = ++state.revealSeq;
+    const t = getI18n(state.prefs.language);
+    const targetId = currentChatId();
+    if (!targetId) {
+      showSidebarToast(t.revealNoChat);
+      return { ok: false, reason: 'no-chat' };
+    }
+
+    const sidebarReady = await ensureSidebarVisible();
+    if (!sidebarReady || state.revealSeq !== seq) return { ok: false, reason: 'sidebar-unavailable' };
+
+    if (!state.lastRenderedItems.length) {
+      await pollTree(true);
+      await waitNextFrame();
+    }
+
+    const pinnedIdx = state.lastPrefixItems.findIndex(it => it?.type === 'row' && (it.cascadeId === targetId || it.id === targetId));
+    if (pinnedIdx >= 0) {
+      const scrolled = await scrollToListIndexAndFlash(pinnedIdx, state.lastRenderedItems, seq);
+      showSidebarToast(t.revealPinned);
+      return { ok: scrolled, location: 'pinned', index: pinnedIdx };
+    }
+
+    if (shouldRenderCustomGrouping()) {
+      if (state.lastMainHdr?.isCollapsed && state.lastRawProps?.onToggleSectionHeader) {
+        state.lastRawProps.onToggleSectionHeader(state.lastMainHdr.collapseId || state.lastMainHdr.id);
+        await waitNextFrame();
+        await waitNextFrame();
+      }
+      const dims = getEffectiveDims();
+      const buildOpts = () => ({
+        collapsedSet: new Set(state.prefs.collapsedGroupKeys || []),
+        expandedReadIdleGroups: state.expandedReadIdleGroups,
+        expandedLimits: state.expandedLimits,
+        activeChatId: targetId,
+        isHistory: false,
+        inbox: state.prefs.inboxEnabled !== false ? getInboxPrefsFromState(state.prefs) : undefined,
+        nowMs: Date.now(),
+        t,
+      });
+
+      let plan = resolveRevealPlan(state.lastLiveConvs, dims, targetId, buildOpts());
+      if (!plan.found) {
+        await pollTree(true);
+        await waitNextFrame();
+        plan = resolveRevealPlan(state.lastLiveConvs, dims, targetId, buildOpts());
+      }
+      if (!plan.found) {
+        showSidebarToast(t.revealNotFound);
+        return { ok: false, reason: 'not-found' };
+      }
+
+      applyRevealOpsAndRender(plan);
+      const finalIdx = state.lastPrefixItems.length + plan.virtualIndex;
+      const scrolled = await scrollToListIndexAndFlash(finalIdx, [...state.lastPrefixItems, ...plan.items], seq);
+      const msg = plan.trail.length ? `${t.revealLocated}${plan.trail.join(' › ')}` : `${t.revealLocated}OK`;
+      showSidebarToast(msg);
+      return { ok: scrolled, location: 'custom', index: finalIdx, trail: plan.trail };
+    }
+
+    const nativeItems = state.lastNativeItems || [];
+    const nativeMain = nativeItems.find(it => it?.type === 'section-header' && (it.id === 'main-section-header' || it.collapseId === 'main-section-header'));
+    if (nativeMain?.isCollapsed && state.lastRawProps?.onToggleSectionHeader) {
+      state.lastRawProps.onToggleSectionHeader(nativeMain.collapseId || nativeMain.id);
+      await waitNextFrame();
+      await waitNextFrame();
+    }
+    const nativeIdx = (state.lastNativeItems || []).findIndex(it => it?.type === 'row' && (it.cascadeId === targetId || it.id === targetId));
+    if (nativeIdx >= 0) {
+      const scrolled = await scrollToListIndexAndFlash(nativeIdx, state.lastNativeItems, seq);
+      showSidebarToast(`${t.revealLocated}Conversations`);
+      return { ok: scrolled, location: 'native', index: nativeIdx };
+    }
+    showSidebarToast(t.revealNotFound);
+    return { ok: false, reason: 'not-found-native' };
+  }
+
+  function syncRevealButton() {
+    const activeId = currentChatId();
+    const existing = document.getElementById(REVEAL_BTN_ID);
+    const host = document.querySelector('.agy-layout-vars');
+    if (!activeId || !host) {
+      existing?.remove();
+      return;
+    }
+    const t = getI18n(state.prefs.language);
+    if (existing) {
+      existing.setAttribute('aria-label', t.revealTooltip);
+      existing.setAttribute('title', t.revealTooltip);
+      const labelNode = existing.querySelector('[data-agy-reveal-label]');
+      if (labelNode && labelNode.textContent !== t.revealLabel) {
+        labelNode.textContent = t.revealLabel;
+      }
+      if (existing.parentElement !== host) host.appendChild(existing);
+      return;
+    }
+    const btn = el('button', '');
+    btn.id = REVEAL_BTN_ID;
+    btn.type = 'button';
+    btn.style.webkitAppRegion = 'no-drag';
+    btn.setAttribute('data-testid', 'agy-reveal-in-sidebar-button');
+    btn.setAttribute('aria-label', t.revealTooltip);
+    btn.setAttribute('title', t.revealTooltip);
+    btn.appendChild(svgDomIcon(ICON_PATHS.my_location, 13));
+    const labelSpan = el('span', '', t.revealLabel);
+    labelSpan.setAttribute('data-agy-reveal-label', 'true');
+    btn.appendChild(labelSpan);
+    for (const evName of ['pointerdown', 'mousedown']) {
+      btn.addEventListener(evName, ev => ev.stopPropagation());
+    }
+    btn.addEventListener('click', ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      void revealActiveConversation();
+    });
+    host.appendChild(btn);
+  }
+
+  window.__agyProjectSidebarReveal = revealActiveConversation;
+
   const scheduleSync = () => {
     if (syncScheduled) return;
     syncScheduled = true;
@@ -2805,13 +3169,17 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       ensureNativeListPatched();
       syncOfficialMenus();
       syncRowInboxControls();
+      syncRevealButton();
     });
   };
 
   const onRouteChange = () => {
     markActiveChatViewed();
     requestReactRefresh();
-    requestAnimationFrame(() => syncRowInboxControls());
+    requestAnimationFrame(() => {
+      syncRowInboxControls();
+      syncRevealButton();
+    });
   };
 
   const mo = new MutationObserver(() => {
@@ -2827,17 +3195,22 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   ensureNativeListPatched();
   syncOfficialMenus();
   syncRowInboxControls();
+  syncRevealButton();
   void pollTree(true);
 
   window.__agyProjectSidebarDispose = () => {
+    state.revealSeq += 1;
     clearInterval(pollTimer);
     clearUndoToast();
+    clearRevealFlash();
     closeSnoozePopover();
     mo.disconnect();
     for (const ev of INTERCEPT_EVENTS) {
       window.removeEventListener(ev, onWindowMenuEvent, true);
     }
     window.removeEventListener('popstate', onRouteChange);
+    delete window.__agyProjectSidebarReveal;
+    document.getElementById(REVEAL_BTN_ID)?.remove();
     document.getElementById(MENU_OPT_ID)?.remove();
     document.getElementById(MENU_INBOX_TOGGLE_ID)?.remove();
     document.getElementById(MENU_INBOX_RETIRE_ID)?.remove();
