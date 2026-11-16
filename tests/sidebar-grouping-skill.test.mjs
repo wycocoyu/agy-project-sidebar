@@ -10,6 +10,7 @@ import {
   parsePairArg,
   previewGrouping,
   searchConversations,
+  summarizeSearchFragmentation,
   validateTitle,
   verifyGrouping,
 } from '../skills/agy-sidebar-grouping/scripts/preview-grouping.mjs';
@@ -81,6 +82,13 @@ test('previewGrouping detects cross-project Issue-N splits, verifies COC-N merge
     const hits = searchConversations(state.conversations, ['OV']);
     assert.equal(hits.length, 2);
 
+    // Multi-alias OR search catches both "OV" and "OpenViking" across projects and flags fragmentation
+    const aliasHits = searchConversations(state.conversations, ['OV', 'OpenViking']);
+    assert.equal(aliasHits.length, 3);
+    assert.equal(summarizeSearchFragmentation(aliasHits).fragmented, true);
+    assert.equal(summarizeSearchFragmentation(aliasHits).ungroupedCount, 2);
+    assert.equal(searchConversations(state.conversations, ['OV', 'OpenViking'], 25, { matchAll: true }).length, 0);
+
     // 1) Issue 4 splits across proj-coco and proj-ov -> flagged!
     const splitPreview = previewGrouping(state, [
       parsePairArg('8f158ad9=1115 | 配置 | Issue 4 OV自动召回'),
@@ -120,6 +128,8 @@ test('previewGrouping detects cross-project Issue-N splits, verifies COC-N merge
     const verified = verifyGrouping(afterState, ['8f158ad9', '5c3cb349', '89da3169']);
     assert.equal(verified.ok, true);
     assert.deepEqual(verified.uniqueReqKeys, ['ISSUE:COC-4']);
+    const afterHits = searchConversations(afterState.conversations, ['COC-4']);
+    assert.equal(summarizeSearchFragmentation(afterHits).fragmented, false);
 
     // 4) CLI smoke invocation returns exit code 0 when valid, 2 when split
     const cliOut = execFileSync(process.execPath, [
