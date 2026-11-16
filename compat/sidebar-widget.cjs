@@ -1327,7 +1327,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       showMore: raw.showMore || 'Show more',
       expandReadIdle: raw.expandReadIdle || '▸ 展开其余 {n} 条已读空闲会话',
       collapseReadIdle: raw.collapseReadIdle || '▾ 收起 {n} 条已读空闲会话',
-      revealTooltip: raw.revealTooltip || '在左侧边栏定位当前会话 (⌘⇧L)',
+      revealLabel: raw.revealLabel || '定位',
+      revealTooltip: raw.revealTooltip || '在左侧边栏定位当前会话',
       revealLocated: raw.revealLocated || '已定位：',
       revealPinned: raw.revealPinned || '当前会话位于顶部 Pinned 置顶区',
       revealNotFound: raw.revealNotFound || '当前列表未找到该会话（可能已归档）',
@@ -1597,22 +1598,31 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   color: var(--foreground, #000000);
 }
 #${REVEAL_BTN_ID} {
+  -webkit-app-region: no-drag !important;
+  app-region: no-drag !important;
+  position: relative;
+  z-index: 20;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px;
   border-radius: 6px;
-  border: none;
-  background: transparent;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+  background: var(--secondary, rgba(10, 10, 12, 0.04));
   color: var(--muted-foreground, #71717a);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
   cursor: pointer;
   flex-shrink: 0;
-  transition: background-color 120ms ease, color 120ms ease;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 #${REVEAL_BTN_ID}:hover {
-  background: var(--secondary, rgba(10,10,12,0.08));
+  background: var(--secondary, rgba(10,10,12,0.09));
   color: var(--foreground, #18181b);
+  border-color: var(--border, rgba(0, 0, 0, 0.18));
 }
 @keyframes agyRevealPulse {
   0% {
@@ -3120,16 +3130,27 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     if (existing) {
       existing.setAttribute('aria-label', t.revealTooltip);
       existing.setAttribute('title', t.revealTooltip);
+      const labelNode = existing.querySelector('[data-agy-reveal-label]');
+      if (labelNode && labelNode.textContent !== t.revealLabel) {
+        labelNode.textContent = t.revealLabel;
+      }
       if (existing.parentElement !== host) host.appendChild(existing);
       return;
     }
     const btn = el('button', '');
     btn.id = REVEAL_BTN_ID;
     btn.type = 'button';
+    btn.style.webkitAppRegion = 'no-drag';
     btn.setAttribute('data-testid', 'agy-reveal-in-sidebar-button');
     btn.setAttribute('aria-label', t.revealTooltip);
     btn.setAttribute('title', t.revealTooltip);
-    btn.appendChild(svgDomIcon(ICON_PATHS.my_location, 15));
+    btn.appendChild(svgDomIcon(ICON_PATHS.my_location, 13));
+    const labelSpan = el('span', '', t.revealLabel);
+    labelSpan.setAttribute('data-agy-reveal-label', 'true');
+    btn.appendChild(labelSpan);
+    for (const evName of ['pointerdown', 'mousedown']) {
+      btn.addEventListener(evName, ev => ev.stopPropagation());
+    }
     btn.addEventListener('click', ev => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -3138,18 +3159,6 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     host.appendChild(btn);
   }
 
-  const onWindowKeyDown = e => {
-    if ((e.metaKey || e.ctrlKey) && e.shiftKey && String(e.key || '').toLowerCase() === 'l') {
-      const activeEl = document.activeElement;
-      const tag = activeEl?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || activeEl?.isContentEditable) return;
-      e.preventDefault();
-      e.stopPropagation();
-      void revealActiveConversation();
-    }
-  };
-
-  window.addEventListener('keydown', onWindowKeyDown, true);
   window.__agyProjectSidebarReveal = revealActiveConversation;
 
   const scheduleSync = () => {
@@ -3199,7 +3208,6 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     for (const ev of INTERCEPT_EVENTS) {
       window.removeEventListener(ev, onWindowMenuEvent, true);
     }
-    window.removeEventListener('keydown', onWindowKeyDown, true);
     window.removeEventListener('popstate', onRouteChange);
     delete window.__agyProjectSidebarReveal;
     document.getElementById(REVEAL_BTN_ID)?.remove();

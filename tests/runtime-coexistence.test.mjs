@@ -498,4 +498,9 @@ test('resolveRevealPlan expands collapsed ancestors, Snoozed, Plan A read-idle f
   const missing = resolveRevealPlan(sample, ['status', 'requirement'], 'does-not-exist', {});
   assert.equal(missing.found, false);
   assert.equal(missing.reason, 'not-in-list');
+
+  // 6) Regression guard: titlebar reveal button MUST opt out of Electron window-drag region
+  const widgetSrc = readFileSync(new URL('../compat/sidebar-widget.cjs', import.meta.url), 'utf8');
+  const cssSlice = widgetSrc.slice(widgetSrc.indexOf('#${REVEAL_BTN_ID} {'));
+  assert.match(cssSlice.slice(0, 400), /-webkit-app-region:\s*no-drag/);
 });
