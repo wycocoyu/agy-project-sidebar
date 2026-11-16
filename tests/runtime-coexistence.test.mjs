@@ -416,3 +416,86 @@ test('Inbox Triage state machine covers watermark, read-stays-in-inbox, 24h auto
   ], baseInbox, now);
   assert.deepEqual(ranked.inboxEntries.map(e => e.conv.id), ['snoozed-woke', 'followup-old', 'read-recent']);
 });
+
+test('resolveRevealPlan expands collapsed ancestors, Snoozed, Plan A read-idle fold, and Show-more pagination precisely', () => {
+  const widgetMount = require('../compat/sidebar-widget.cjs');
+  const { resolveRevealPlan } = widgetMount({ __unitTestOnly: true });
+
+  const now = 1_700_100_000_000;
+  const sample = [
+    { id: 'run-a', projectKey: 'p1', title: '1116 | 功能 | COC-4 live work', statusGroup: 'in_progress', isUnread: false, updatedAtMs: now },
+    { id: 'idle-folded', projectKey: 'p1', title: '1116 | 调试 | COC-4 read idle sibling', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 10_000 },
+    { id: 'snoozed-1', projectKey: 'p1', title: '1116 | 分析 | Q94 snoozed chat', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 20_000 },
+    { id: 'other-1', projectKey: 'p2', title: '1115 | 设计 | MUL-700 unrelated', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 30_000 },
+  ];
+  // Add 50 standalone/grouped items past 40-cluster pagination in Requirement mode
+  for (let i = 1; i <= 48; i += 1) {
+    sample.push({
+      id: `req-${i}`,
+      projectKey: 'p2',
+      title: `1115 | 功能 | REQ-${100 + i} paginated req ${i}`,
+      statusGroup: 'idle',
+      isUnread: false,
+      updatedAtMs: now - (i + 5) * 60_000,
+    });
+  }
+
+  const inboxCfg = {
+    enabled: true,
+    enabledAtMs: now - 5000,
+    autoRetireHours: 24,
+    settled: { 'idle-folded': { atMs: now - 2000, updatedMs: now - 10_000 } },
+    followUp: {},
+    snoozed: { 'snoozed-1': { untilMs: now + 3600_000, setAtMs: now - 1000, updatedMs: now - 20_000 } },
+  };
+
+  // 1) Target inside collapsed Idle + collapsed REQ-148 past limit 40 in Status + Requirement
+  const plan1 = resolveRevealPlan(sample, ['status', 'requirement'], 'req-48', {
+    collapsedKeys: ['col:status:idle'],
+    inbox: inboxCfg,
+    nowMs: now,
+  });
+  assert.equal(plan1.found, true);
+  assert.deepEqual(plan1.toggleOps, [
+    { toggleKey: 'col:status:idle', action: 'delete' },
+    { toggleKey: 'exp:status:idle/req:ISSUE:REQ-148', action: 'add' },
+  ]);
+  assert.ok(plan1.limitPatches['status:idle'] >= 48);
+  assert.equal(plan1.items[plan1.virtualIndex].cascadeId, 'req-48');
+  assert.equal(plan1.trail[0], 'Idle');
+
+  // 2) Plan A folded read-idle sibling inside active In Progress COC-4
+  const plan2 = resolveRevealPlan(sample, ['status', 'requirement'], 'idle-folded', {
+    collapsedKeys: [],
+    inbox: inboxCfg,
+    nowMs: now,
+  });
+  assert.equal(plan2.found, true);
+  assert.deepEqual(plan2.readIdleKeys, ['status:in_progress/req:ISSUE:COC-4']);
+  assert.equal(plan2.items[plan2.virtualIndex].cascadeId, 'idle-folded');
+
+  // 3) Collapsed Snoozed bucket
+  const plan3 = resolveRevealPlan(sample, ['status', 'requirement'], 'snoozed-1', {
+    collapsedKeys: [],
+    inbox: inboxCfg,
+    nowMs: now,
+  });
+  assert.equal(plan3.found, true);
+  assert.deepEqual(plan3.toggleOps, [{ toggleKey: 'exp:inbox:snoozed', action: 'add' }]);
+  assert.equal(plan3.items[plan3.virtualIndex].cascadeId, 'snoozed-1');
+
+  // 4) Paginated cluster #48 in Requirement-only view
+  const plan4 = resolveRevealPlan(sample, ['requirement'], 'req-48', {
+    collapsedKeys: [],
+    inbox: inboxCfg,
+    nowMs: now,
+  });
+  assert.equal(plan4.found, true);
+  assert.ok(plan4.limitPatches['root:requirement'] >= 48);
+  assert.deepEqual(plan4.toggleOps, [{ toggleKey: 'exp:req:ISSUE:REQ-148', action: 'add' }]);
+
+  // 5) Missing / archived target returns clean not-in-list
+  const missing = resolveRevealPlan(sample, ['status', 'requirement'], 'does-not-exist', {});
+  assert.equal(missing.found, false);
+  assert.equal(missing.reason, 'not-in-list');
+});

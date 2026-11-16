@@ -36,6 +36,11 @@ module.exports = function createI18n(lang = 'zh-CN') {
       showMore: 'Show more',
       expandReadIdle: '▸ 展开其余 {n} 条已读空闲会话',
       collapseReadIdle: '▾ 收起 {n} 条已读空闲会话',
+      revealTooltip: '在左侧边栏定位当前会话 (⌘⇧L)',
+      revealLocated: '已定位：',
+      revealPinned: '当前会话位于顶部 Pinned 置顶区',
+      revealNotFound: '当前列表未找到该会话（可能已归档）',
+      revealNoChat: '请先打开一个会话',
     },
     en: {
       labels: {
@@ -73,6 +78,11 @@ module.exports = function createI18n(lang = 'zh-CN') {
       showMore: 'Show more',
       expandReadIdle: '▸ Show {n} read idle',
       collapseReadIdle: '▾ Hide {n} read idle',
+      revealTooltip: 'Locate in Sidebar (⌘⇧L)',
+      revealLocated: 'Located: ',
+      revealPinned: 'Pinned at top of sidebar',
+      revealNotFound: 'Not in active sidebar list (check Archived)',
+      revealNoChat: 'Open a conversation first',
     },
   };
   return dict[lang] || dict['zh-CN'];
