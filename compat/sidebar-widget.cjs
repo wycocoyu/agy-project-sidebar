@@ -2098,13 +2098,16 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
   height: 28px;
-  padding: 0;
+  padding: 0 8px;
   border: none;
   border-radius: 8px;
   background: transparent;
   color: var(--muted-foreground, #71717a);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   flex-shrink: 0;
   transition: background-color 120ms ease, color 120ms ease;
@@ -3732,34 +3735,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     return { ok: false, reason: 'not-found-native' };
   }
 
-  const REVEAL_BTN_CLASS = 'agy-button agy-button-icon-lg inline-flex items-center justify-center font-medium transition-colors select-none outline-none cursor-pointer h-7 w-7 shrink-0 rounded-lg group bg-transparent text-secondary-foreground hover:text-foreground hover:bg-secondary focus-visible:text-foreground focus-visible:bg-secondary';
-
-  function svgStrokeLocateIcon(size = 16) {
-    const ns = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(ns, 'svg');
-    svg.setAttribute('viewBox', '0 0 24 24');
-    svg.setAttribute('width', String(size));
-    svg.setAttribute('height', String(size));
-    svg.setAttribute('fill', 'none');
-    svg.setAttribute('stroke', 'currentColor');
-    svg.setAttribute('stroke-width', '1.75');
-    svg.setAttribute('stroke-linecap', 'round');
-    svg.setAttribute('stroke-linejoin', 'round');
-    svg.setAttribute('aria-hidden', 'true');
-    svg.setAttribute('class', 'pointer-events-none outline-none');
-    const appendShape = (tag, attrs) => {
-      const node = document.createElementNS(ns, tag);
-      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
-      svg.appendChild(node);
-    };
-    appendShape('line', { x1: '2', x2: '5', y1: '12', y2: '12' });
-    appendShape('line', { x1: '19', x2: '22', y1: '12', y2: '12' });
-    appendShape('line', { x1: '12', x2: '12', y1: '2', y2: '5' });
-    appendShape('line', { x1: '12', x2: '12', y1: '19', y2: '22' });
-    appendShape('circle', { cx: '12', cy: '12', r: '7' });
-    appendShape('circle', { cx: '12', cy: '12', r: '3' });
-    return svg;
-  }
+  const REVEAL_BTN_CLASS = 'agy-button inline-flex items-center justify-center font-medium transition-colors select-none outline-none cursor-pointer h-7 px-2 shrink-0 rounded-lg bg-transparent text-secondary-foreground hover:text-foreground hover:bg-secondary focus-visible:text-foreground focus-visible:bg-secondary text-xs';
 
   function syncRevealButton() {
     const activeId = currentChatId();
@@ -3774,7 +3750,15 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       if (existing.className !== REVEAL_BTN_CLASS) existing.className = REVEAL_BTN_CLASS;
       existing.setAttribute('aria-label', t.revealTooltip);
       existing.setAttribute('title', t.revealTooltip);
-      existing.querySelector('[data-agy-reveal-label]')?.remove();
+      for (const svg of existing.querySelectorAll('svg')) svg.remove();
+      let labelNode = existing.querySelector('[data-agy-reveal-label]');
+      if (!labelNode) {
+        labelNode = el('span', '', t.revealLabel);
+        labelNode.setAttribute('data-agy-reveal-label', 'true');
+        existing.appendChild(labelNode);
+      } else if (labelNode.textContent !== t.revealLabel) {
+        labelNode.textContent = t.revealLabel;
+      }
       if (existing.parentElement !== host) host.appendChild(existing);
       return;
     }
@@ -3785,7 +3769,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     btn.setAttribute('data-testid', 'agy-reveal-in-sidebar-button');
     btn.setAttribute('aria-label', t.revealTooltip);
     btn.setAttribute('title', t.revealTooltip);
-    btn.appendChild(svgStrokeLocateIcon(16));
+    const labelSpan = el('span', '', t.revealLabel);
+    labelSpan.setAttribute('data-agy-reveal-label', 'true');
+    btn.appendChild(labelSpan);
     for (const evName of ['pointerdown', 'mousedown']) {
       btn.addEventListener(evName, ev => ev.stopPropagation());
     }
