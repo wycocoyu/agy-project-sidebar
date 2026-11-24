@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * Read-only search, preflight validation, and verification helper for
- * organizing Antigravity conversations into unified sidebar requirement groups.
+ * Search, preflight validation, Sidecar override write, and verification helper
+ * for organizing Antigravity conversations into unified sidebar requirement groups.
  *
- * Reuses SidebarCollector, compat/sidebar-widget.cjs, and PreferencesStore
- * directly so grouping predictions match live sidebar behavior.
+ * Uses Sidecar requirementOverrides in preferences.json without mutating AGY
+ * SQLite, .pbtxt, or last_modified_time (never calls agy-rename).
  */
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { platformPaths } from '../../../compat/platform.mjs';
-import { PreferencesStore } from '../../../compat/preferences.mjs';
-import { buildSidebarSnapshot, SidebarCollector } from '../../../sidecars/panel/collector.mjs';
+import { parseRequirementOverrideEntry, PreferencesStore } from '../../../compat/preferences.mjs';
+import { assignRequirements, buildSidebarSnapshot, SidebarCollector } from '../../../sidecars/panel/collector.mjs';
 
 const require = createRequire(import.meta.url);
 const mountSidebarWidget = require('../../../compat/sidebar-widget.cjs');
@@ -53,6 +53,30 @@ export function validateTitle(title) {
   };
 }
 
+/** Validate a Sidecar requirementOverrides entry `{ key, label }`. */
+export function validateOverrideEntry(entry) {
+  const errors = [];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return { ok: false, key: '', label: '', errors: ['Override entry must be an object'] };
+  }
+  const key = typeof entry.key === 'string' ? entry.key.replace(/\s+/g, ' ').trim() : '';
+  const label = typeof entry.label === 'string' ? entry.label.replace(/\s+/g, ' ').trim() : '';
+  if (!key) errors.push('Override key must be non-empty');
+  else if (key.length > 160) errors.push(`Override key exceeds 160 chars (${key.length})`);
+  if (key.toUpperCase() !== 'INBOX') {
+    if (!label) errors.push('Override label must be non-empty');
+    else if (label.length > 200) errors.push(`Override label exceeds 200 chars (${label.length})`);
+  }
+  const parsed = parseRequirementOverrideEntry({ key, label });
+  if (!parsed && errors.length === 0) errors.push('Invalid requirementOverride entry');
+  return {
+    ok: errors.length === 0 && Boolean(parsed),
+    key: parsed?.key || key,
+    label: parsed?.label ?? label,
+    errors,
+  };
+}
+
 /** Convert PreferencesStore JSON keys into classifyInboxConversation options. */
 export function toInboxModel(prefs = {}) {
   return {
@@ -65,16 +89,20 @@ export function toInboxModel(prefs = {}) {
   };
 }
 
-/** Parse "<idOrPrefix>=<newTitle>" safely on the first "=". */
-export function parsePairArg(spec) {
-  const idx = String(spec || '').indexOf('=');
-  if (idx <= 0 || idx === spec.length - 1) {
-    throw new Error(`Invalid pair "${spec}"; expected "<uuid_or_prefix>=<MMDD | 分类 | 主题>"`);
+/** Parse "<idOrPrefix>=<key>[|<label>]" safely on the first "=" and optional "|". */
+export function parseOverrideSpec(spec, fallbackLabel = '') {
+  const raw = String(spec || '');
+  const idx = raw.indexOf('=');
+  if (idx <= 0 || idx === raw.length - 1) {
+    throw new Error(`Invalid spec "${spec}"; expected "<uuid_or_prefix>=<key>[|<label>]"`);
   }
-  return {
-    idQuery: spec.slice(0, idx).trim(),
-    title: spec.slice(idx + 1).trim(),
-  };
+  const idQuery = raw.slice(0, idx).trim();
+  const rhs = raw.slice(idx + 1).trim();
+  const pipeIdx = rhs.indexOf('|');
+  const key = (pipeIdx >= 0 ? rhs.slice(0, pipeIdx) : rhs).trim();
+  const rawLabel = (pipeIdx >= 0 ? rhs.slice(pipeIdx + 1) : fallbackLabel).trim();
+  const label = key.toUpperCase() === 'INBOX' ? '' : (rawLabel || key);
+  return { idQuery, key, label };
 }
 
 /** Resolve full UUID or unambiguous prefix inside a conversation list. */
@@ -116,7 +144,7 @@ function deriveFallbackProjectsFromRows(rows) {
   return [...byId.values()];
 }
 
-/** Load live or offline snapshot + preferences + widget grouping annotations. */
+/** Load live or offline snapshot + preferences + 3-tier requirement + inbox annotations. */
 export async function loadSidebarState({
   dbPath,
   prefsPath,
@@ -136,7 +164,11 @@ export async function loadSidebarState({
 
   let snapshot;
   if (useLs && !rawProjects) {
-    snapshot = await collector.snapshot({ force: true, showArchived });
+    snapshot = await collector.snapshot({
+      force: true,
+      showArchived,
+      requirementOverrides: prefs.requirementOverrides || {},
+    });
   } else {
     const { rows, archivedIds } = collector.readConversationsFromDb();
     snapshot = buildSidebarSnapshot({
@@ -144,12 +176,12 @@ export async function loadSidebarState({
       rows,
       archivedIds,
       showArchived,
+      requirementOverrides: prefs.requirementOverrides || {},
     });
   }
 
   const inboxModel = toInboxModel(prefs);
-  const assigned = widgetTestApi.assignRequirements(snapshot.conversations || []);
-  const enriched = assigned.map(conv => ({
+  const enriched = (snapshot.conversations || []).map(conv => ({
     ...conv,
     bucket: widgetTestApi.classifyInboxConversation(conv, inboxModel, nowMs).bucket,
     updatedIso: conv.updatedAtMs ? new Date(conv.updatedAtMs).toISOString() : '',
@@ -171,7 +203,7 @@ export function searchConversations(conversations, terms = [], limit = 25, { mat
   } else {
     ranked = [];
     for (const c of conversations) {
-      const haystack = [c.id, c.title, c.projectName, c.repoName, c.reqKey, c.reqLabel].join(' ').toLowerCase();
+      const haystack = [c.id, c.title, c.projectName, c.repoName, c.reqKey, c.reqLabel, c.groupId].join(' ').toLowerCase();
       const hitCount = cleanTerms.filter(term => haystack.includes(term)).length;
       const matches = matchAll ? hitCount === cleanTerms.length : hitCount > 0;
       if (matches) ranked.push({ conv: c, score: hitCount });
@@ -188,6 +220,7 @@ export function searchConversations(conversations, terms = [], limit = 25, { mat
     bucket: c.bucket,
     reqKey: c.reqKey,
     reqLabel: c.reqLabel,
+    reqSource: c.reqSource || 'inbox',
     updatedIso: c.updatedIso,
     matchScore: score,
   }));
@@ -208,8 +241,8 @@ export function summarizeSearchFragmentation(hits = []) {
   };
 }
 
-/** Group items inside each status bucket and compute bucket-specific reqLabels. */
-function summarizePerBucket(baseConvs, targetIdSet, inboxModel, nowMs) {
+/** Group items inside each status bucket and compute bucket-specific reqLabels using 3-tier resolution. */
+function summarizePerBucket(baseConvs, targetIdSet, inboxModel, nowMs, requirementOverrides = {}) {
   const byBucket = new Map();
   for (const conv of baseConvs) {
     const bucket = widgetTestApi.classifyInboxConversation(conv, inboxModel, nowMs).bucket;
@@ -218,7 +251,7 @@ function summarizePerBucket(baseConvs, targetIdSet, inboxModel, nowMs) {
   }
   const perBucket = {};
   for (const [bucket, list] of byBucket.entries()) {
-    const scoped = widgetTestApi.assignRequirements(list);
+    const scoped = assignRequirements(list, { requirementOverrides });
     const targetsHere = scoped.filter(c => targetIdSet.has(c.id));
     if (!targetsHere.length) continue;
     perBucket[bucket] = {
@@ -232,56 +265,102 @@ function summarizePerBucket(baseConvs, targetIdSet, inboxModel, nowMs) {
 }
 
 /**
- * Simulate renaming a set of conversations and detect cross-project splits,
- * title validation issues, or bucket-level label hijacking BEFORE renaming.
+ * Simulate applying Sidecar requirementOverrides and detect cross-project splits,
+ * invalid override entries, or bucket-level label splits BEFORE saving preferences.json.
  */
-export function previewGrouping(state, pairs) {
-  if (!Array.isArray(pairs) || pairs.length === 0) {
-    throw new Error('Provide at least one conversation rename pair');
+export function previewGrouping(state, specs) {
+  if (!Array.isArray(specs) || specs.length === 0) {
+    throw new Error('Provide at least one conversation override spec');
   }
-  const overrideById = new Map();
-  const titleChecks = [];
-  for (const pair of pairs) {
-    const fullId = resolveConversationId(state.conversations, pair.idQuery);
-    const check = validateTitle(pair.title);
-    overrideById.set(fullId, pair.title);
-    titleChecks.push({ id: fullId, shortId: fullId.slice(0, 8), proposedTitle: pair.title, ...check });
+  const proposedOverrides = {};
+  const overrideChecks = [];
+  for (const spec of specs) {
+    const fullId = resolveConversationId(state.conversations, spec.idQuery);
+    const check = validateOverrideEntry({ key: spec.key, label: spec.label });
+    proposedOverrides[fullId] = { key: check.key, label: check.label };
+    overrideChecks.push({ id: fullId, shortId: fullId.slice(0, 8), ...check });
   }
 
-  const simulated = state.conversations.map(c => (
-    overrideById.has(c.id) ? { ...c, title: overrideById.get(c.id) } : c
-  ));
-  const assignedAll = widgetTestApi.assignRequirements(simulated);
-  const targets = assignedAll.filter(c => overrideById.has(c.id));
+  const mergedOverrides = {
+    ...(state.prefs?.requirementOverrides || {}),
+    ...proposedOverrides,
+  };
+  const assignedAll = assignRequirements(state.conversations, { requirementOverrides: mergedOverrides });
+  const targetIdSet = new Set(Object.keys(proposedOverrides));
+  const targets = assignedAll.filter(c => targetIdSet.has(c.id));
   const uniqueReqKeys = [...new Set(targets.map(c => c.reqKey))];
   const uniqueProjectKeys = [...new Set(targets.map(c => c.projectKey))];
-  const targetIdSet = new Set(overrideById.keys());
-  const perBucket = summarizePerBucket(simulated, targetIdSet, state.inboxModel, state.nowMs);
+  const perBucket = summarizePerBucket(state.conversations, targetIdSet, state.inboxModel, state.nowMs, mergedOverrides);
 
-  const validTitles = titleChecks.every(t => t.ok);
+  const validEntries = overrideChecks.every(o => o.ok);
   const singleGroup = uniqueReqKeys.length === 1 && !uniqueReqKeys[0]?.startsWith('INBOX');
   const warnings = [];
-  if (!validTitles) warnings.push('One or more proposed titles violate 00-session-naming rules');
+  if (!validEntries) warnings.push('One or more requirementOverrides entries failed validation');
   if (uniqueReqKeys.length === 1 && uniqueReqKeys[0]?.startsWith('INBOX')) {
-    warnings.push('Proposed titles resolved to INBOX instead of a requirement group (use "COC-4", "Issue 4", etc.)');
+    warnings.push('Proposed overrides resolved to INBOX instead of a requirement group (use "COC-4", "Issue 17", etc.)');
   }
   if (uniqueReqKeys.length > 1) {
-    warnings.push(`Cross-project split detected (${uniqueReqKeys.length} groups): replace "Issue N"/"PR N"/bracket tag with a hyphenated prefix like "COC-4"`);
+    warnings.push(`Cross-project split detected (${uniqueReqKeys.length} groups): replace "Issue N"/"PR N"/bracket tag with a cross-project key like "COC-4"`);
   }
   if (Object.keys(perBucket).length > 1 && perBucket.inbox) {
     warnings.push(`Sessions span ${Object.keys(perBucket).join(' + ')}; settle Inbox item(s) or switch Group By to merge them visually`);
   }
 
   return {
-    ok: validTitles && singleGroup,
+    ok: validEntries && singleGroup,
     groupByDimensions: state.prefs.groupByDimensions,
     uniqueReqKeys,
     overallReqLabel: targets[0]?.reqLabel || '',
     crossProject: uniqueProjectKeys.length > 1,
     perBucket,
-    titleChecks,
-    readyCommands: titleChecks.map(t => `agy-rename ${t.id} "${t.proposedTitle}"`),
+    overrideChecks,
+    proposedOverrides,
     warnings,
+  };
+}
+
+/** Write validated Sidecar requirementOverrides atomically and re-verify without touching AGY SQLite/.pbtxt. */
+export async function applyGrouping(state, specs) {
+  const preview = previewGrouping(state, specs);
+  if (!preview.ok) {
+    return {
+      ok: false,
+      appliedCount: 0,
+      proposedOverrides: preview.proposedOverrides,
+      warnings: preview.warnings,
+      preview,
+    };
+  }
+  const store = new PreferencesStore(state.paths.preferences);
+  await store.patchRequirementOverrides(preview.proposedOverrides);
+  const afterState = await loadSidebarState({
+    dbPath: state.paths.conversationsDb,
+    prefsPath: state.paths.preferences,
+    useLs: false,
+    nowMs: state.nowMs,
+  });
+  const verified = verifyGrouping(afterState, Object.keys(preview.proposedOverrides));
+  return {
+    ok: verified.ok,
+    appliedCount: Object.keys(preview.proposedOverrides).length,
+    proposedOverrides: preview.proposedOverrides,
+    verified,
+    warnings: preview.warnings,
+  };
+}
+
+/** Remove Sidecar requirementOverrides entries for the specified conversations. */
+export async function clearGroupingOverrides(state, idSelectors) {
+  if (!Array.isArray(idSelectors) || idSelectors.length === 0) {
+    throw new Error('Provide at least one conversation ID or prefix to clear');
+  }
+  const fullIds = idSelectors.map(sel => resolveConversationId(state.conversations, sel));
+  const store = new PreferencesStore(state.paths.preferences);
+  const updated = await store.patchRequirementOverrides({}, { remove: fullIds });
+  return {
+    ok: true,
+    removedIds: fullIds,
+    remainingCount: Object.keys(updated.requirementOverrides || {}).length,
   };
 }
 
@@ -294,20 +373,23 @@ export function verifyGrouping(state, idSelectors) {
   const targetSet = new Set(fullIds);
   const targets = state.conversations.filter(c => targetSet.has(c.id));
   const uniqueReqKeys = [...new Set(targets.map(c => c.reqKey))];
-  const perBucket = summarizePerBucket(state.conversations, targetSet, state.inboxModel, state.nowMs);
+  const overrides = state.prefs?.requirementOverrides || {};
+  const perBucket = summarizePerBucket(state.conversations, targetSet, state.inboxModel, state.nowMs, overrides);
   const items = targets.map(c => ({
     id: c.id,
     shortId: c.id.slice(0, 8),
     title: c.title,
-    titleValid: validateTitle(c.title).ok,
     projectName: c.projectName || c.repoName || 'unassigned',
     bucket: c.bucket,
     reqKey: c.reqKey,
     reqLabel: c.reqLabel,
+    reqKind: c.reqKind,
+    reqSource: c.reqSource || 'inbox',
+    override: overrides[c.id] || null,
     updatedIso: c.updatedIso,
   }));
   return {
-    ok: uniqueReqKeys.length === 1 && items.every(i => i.titleValid),
+    ok: uniqueReqKeys.length === 1 && Boolean(uniqueReqKeys[0]) && uniqueReqKeys[0] !== 'INBOX',
     groupByDimensions: state.prefs.groupByDimensions,
     uniqueReqKeys,
     perBucket,
@@ -318,8 +400,17 @@ export function verifyGrouping(state, idSelectors) {
 function parseCliArgs(argv) {
   const [command, ...rest] = argv;
   const positional = [];
-  const pairs = [];
-  const opts = { json: false, noLs: false, matchAll: false, limit: 25, dbPath: undefined, prefsPath: undefined };
+  const specs = [];
+  const opts = {
+    json: false,
+    noLs: false,
+    matchAll: false,
+    limit: 25,
+    dbPath: undefined,
+    prefsPath: undefined,
+    key: '',
+    label: '',
+  };
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i];
     if (arg === '--json') opts.json = true;
@@ -328,18 +419,32 @@ function parseCliArgs(argv) {
     else if (arg === '--limit') opts.limit = Number(rest[++i] || 25);
     else if (arg === '--db') opts.dbPath = rest[++i];
     else if (arg === '--prefs') opts.prefsPath = rest[++i];
-    else if (arg === '--pair') pairs.push(parsePairArg(rest[++i]));
-    else if (command === 'check' && arg.includes('=')) pairs.push(parsePairArg(arg));
-    else positional.push(arg);
+    else if (arg === '--key') opts.key = String(rest[++i] || '').trim();
+    else if (arg === '--label') opts.label = String(rest[++i] || '').trim();
+    else if (arg === '--pair') specs.push(parseOverrideSpec(rest[++i], opts.label));
+    else if ((command === 'check' || command === 'apply') && arg.includes('=')) {
+      specs.push(parseOverrideSpec(arg, opts.label));
+    } else {
+      positional.push(arg);
+    }
   }
-  return { command, positional, pairs, opts };
+  if ((command === 'check' || command === 'apply') && positional.length > 0) {
+    if (!opts.key) {
+      throw new Error('Provide --key <groupKey> (with optional --label <displayLabel>) or "<id>=<key>|<label>"');
+    }
+    const label = opts.key.toUpperCase() === 'INBOX' ? '' : (opts.label || opts.key);
+    for (const idQuery of positional) {
+      specs.push({ idQuery, key: opts.key, label });
+    }
+  }
+  return { command, positional, specs, opts };
 }
 
 function formatTextReport(command, result) {
   if (command === 'search') {
     if (result.length === 0) return 'No matching conversations found.';
     const lines = result.map(r => (
-      `${r.shortId} | ${r.bucket.padEnd(7)} | ${r.projectName} | ${r.reqKey} | ${r.title}`
+      `${r.shortId} | ${r.bucket.padEnd(7)} | ${r.projectName} | ${r.reqKey} [${r.reqSource}] | ${r.title}`
     ));
     if (result.length >= 2) {
       const frag = summarizeSearchFragmentation(result);
@@ -352,13 +457,17 @@ function formatTextReport(command, result) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const { command, positional, pairs, opts } = parseCliArgs(argv);
+  const { command, positional, specs, opts } = parseCliArgs(argv);
   if (!command || command === '--help' || command === '-h') {
     console.log([
       'Usage:',
       '  preview-grouping.mjs search [terms...] [--all] [--limit 25] [--json]',
-      '  preview-grouping.mjs check <idOrPrefix>=<newTitle> ... [--json]',
-      '  preview-grouping.mjs verify <idOrPrefix> ... [--json]',
+      '  preview-grouping.mjs check --key <key> [--label <label>] <idOrPrefix>... [--json]',
+      '  preview-grouping.mjs check <idOrPrefix>=<key>|<label>... [--json]',
+      '  preview-grouping.mjs apply --key <key> [--label <label>] <idOrPrefix>... [--json]',
+      '  preview-grouping.mjs apply <idOrPrefix>=<key>|<label>... [--json]',
+      '  preview-grouping.mjs clear <idOrPrefix>... [--json]',
+      '  preview-grouping.mjs verify <idOrPrefix>... [--json]',
     ].join('\n'));
     return 0;
   }
@@ -370,8 +479,13 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === 'search') {
     result = searchConversations(state.conversations, positional, opts.limit, { matchAll: opts.matchAll });
   } else if (command === 'check') {
-    result = previewGrouping(state, pairs);
+    result = previewGrouping(state, specs);
     if (!result.ok) exitCode = 2;
+  } else if (command === 'apply') {
+    result = await applyGrouping(state, specs);
+    if (!result.ok) exitCode = 2;
+  } else if (command === 'clear' || command === 'remove') {
+    result = await clearGroupingOverrides(state, positional);
   } else if (command === 'verify') {
     result = verifyGrouping(state, positional);
     if (!result.ok) exitCode = 2;

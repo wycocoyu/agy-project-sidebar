@@ -1,15 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  assignRequirements,
   buildSidebarSnapshot,
   extractRequirementDescriptor,
   filterRealProjects,
   SidebarCollector,
 } from '../sidecars/panel/collector.mjs';
+import { DEFAULT_PREFERENCES, PreferencesStore } from '../compat/preferences.mjs';
 
 test('filterRealProjects excludes sidecar virtual projects and preserves local folders', () => {
   const raw = [
@@ -224,6 +226,168 @@ test('SidebarCollector reads SQLite conversation_summaries and excludes killed/n
     const snap = buildSidebarSnapshot({ rows: res2.rows, archivedIds: res2.archivedIds });
     const top1 = snap.conversations.find(c => c.id === 'top-1');
     assert.ok(top1 && top1.userInputAtMs > 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('PreferencesStore validates, atomically persists, and patches requirementOverrides', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-ps-reqov-'));
+  const prefsPath = join(dir, 'preferences.json');
+  try {
+    const store = new PreferencesStore(prefsPath);
+    const initial = await store.get();
+    assert.deepEqual(initial.requirementOverrides, {});
+    assert.deepEqual(DEFAULT_PREFERENCES.requirementOverrides, {});
+
+    const saved = await store.set({
+      language: 'en',
+      requirementOverrides: {
+        'conv-1': { key: '  COC-4  ', label: '  COC-4   OpenViking插件  ' },
+        'conv-2': { key: 'Issue 17', label: 'Issue 17 兼容' },
+        'conv-inbox': { key: 'INBOX', label: 'ignored' },
+        'bad-empty-label': { key: 'COC-9', label: '   ' },
+        'bad-type': 'not-an-object',
+        '': { key: 'COC-1', label: 'missing-id' },
+      },
+    });
+    assert.equal(saved.language, 'en');
+    assert.deepEqual(saved.requirementOverrides, {
+      'conv-1': { key: 'COC-4', label: 'COC-4 OpenViking插件' },
+      'conv-2': { key: 'Issue 17', label: 'Issue 17 兼容' },
+      'conv-inbox': { key: 'INBOX', label: '' },
+    });
+
+    const patched = await store.patchRequirementOverrides(
+      { 'conv-3': { key: 'MUL-797', label: 'MUL-797 通用Runner' }, 'conv-2': null },
+      { remove: ['conv-inbox'] },
+    );
+    assert.deepEqual(patched.requirementOverrides, {
+      'conv-1': { key: 'COC-4', label: 'COC-4 OpenViking插件' },
+      'conv-3': { key: 'MUL-797', label: 'MUL-797 通用Runner' },
+    });
+
+    const disk = JSON.parse(readFileSync(prefsPath, 'utf8'));
+    assert.deepEqual(disk.requirementOverrides, patched.requirementOverrides);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('buildSidebarSnapshot enforces strict 3-tier resolution (overrides > title > convgroup) and scoping', () => {
+  const rawProjects = [
+    { id: 'p-coco', name: 'cocoyuworkspace', projectResources: { resources: [{ gitFolder: { folderUri: 'file:///tmp/ws/cocoyuworkspace' } }] } },
+    { id: 'p-side', name: 'agy-project-sidebar', projectResources: { resources: [{ gitFolder: { folderUri: 'file:///tmp/ws/agy-project-sidebar' } }] } },
+  ];
+  const rows = [
+    // Tier 1 overrides Tier 2 title (Issue 99) and Tier 3 group_id, and merges cross-project COC-4
+    { conversation_id: 'ov-1', title: '1115 | 功能 | Issue 99 旧标题', group_id: 'convgroup:legacy', project_id: 'p-coco', workspace_uris: '[]', last_modified_time: '2026-11-20 10:00:00+00:00' },
+    { conversation_id: 'ov-2', title: 'Investigate sidecar auth', group_id: '', project_id: 'p-side', workspace_uris: '[]', last_modified_time: '2026-11-20 09:00:00+00:00' },
+    // Tier 1 per-project Issue 17 stays isolated per project
+    { conversation_id: 'iss-p1', title: 'Chat in coco', project_id: 'p-coco', workspace_uris: '[]', last_modified_time: '2026-11-20 08:30:00+00:00' },
+    { conversation_id: 'iss-p2', title: 'Chat in sidebar', project_id: 'p-side', workspace_uris: '[]', last_modified_time: '2026-11-20 08:20:00+00:00' },
+    // Tier 2 title Issue wins over Tier 3 group_id
+    { conversation_id: 't2-1', title: '1120 | 修复 | Issue 17 兼容修复', group_id: 'convgroup:other', project_id: 'p-side', workspace_uris: '[]', last_modified_time: '2026-11-20 08:10:00+00:00' },
+    // Tier 3 group_id fallback catches ungrouped chats & singleton theme-candidates
+    { conversation_id: 'g3-1', title: '1120 | 分析 | 单独调研话题', group_id: 'convgroup:native-sync', project_id: 'p-coco', workspace_uris: '[]', last_modified_time: '2026-11-20 07:30:00+00:00' },
+    { conversation_id: 'g3-2', title: 'Untitled chat', group_id: 'convgroup:native-sync', project_id: 'p-side', workspace_uris: '[]', last_modified_time: '2026-11-20 07:00:00+00:00' },
+    // Tier 1 INBOX override beats Tier 2 title & Tier 3 group_id
+    { conversation_id: 'inb-1', title: '1120 | 修复 | COC-4 强制回Inbox', group_id: 'convgroup:native-sync', project_id: 'p-coco', workspace_uris: '[]', last_modified_time: '2026-11-20 06:00:00+00:00' },
+  ];
+
+  const snap = buildSidebarSnapshot({
+    rawProjects,
+    rows,
+    requirementOverrides: {
+      'ov-1': { key: 'COC-4', label: 'COC-4 统一需求组' },
+      'ov-2': { key: 'ISSUE:COC-4', label: 'COC-4 统一需求组' },
+      'iss-p1': { key: 'Issue 17', label: 'Issue 17 Coco' },
+      'iss-p2': { key: 'Issue 17', label: 'Issue 17 Sidebar' },
+      'inb-1': { key: 'INBOX', label: '' },
+    },
+  });
+  const byId = Object.fromEntries(snap.conversations.map(c => [c.id, c]));
+
+  assert.equal(byId['ov-1'].reqKey, 'ISSUE:COC-4');
+  assert.equal(byId['ov-2'].reqKey, 'ISSUE:COC-4');
+  assert.equal(byId['ov-1'].reqCount, 2);
+  assert.equal(byId['ov-1'].reqLabel, 'COC-4 统一需求组');
+  assert.equal(byId['ov-1'].reqSource, 'override');
+
+  assert.equal(byId['iss-p1'].reqKey, 'p-coco::ISSUE:17');
+  assert.equal(byId['iss-p1'].reqCount, 1);
+  assert.equal(byId['iss-p2'].reqKey, 'p-side::ISSUE:17');
+  assert.equal(byId['t2-1'].reqKey, 'p-side::ISSUE:17');
+  assert.equal(byId['iss-p2'].reqCount, 2);
+  assert.equal(byId['iss-p2'].reqLabel, 'Issue 17 Sidebar');
+  assert.equal(byId['t2-1'].reqSource, 'title');
+
+  assert.equal(byId['g3-1'].reqKey, 'convgroup:native-sync');
+  assert.equal(byId['g3-2'].reqKey, 'convgroup:native-sync');
+  assert.equal(byId['g3-1'].reqKind, 'convgroup');
+  assert.equal(byId['g3-1'].reqSource, 'group_id');
+  assert.equal(byId['g3-1'].reqCount, 2);
+
+  assert.equal(byId['inb-1'].reqKey, 'INBOX');
+  assert.equal(byId['inb-1'].reqKind, 'inbox');
+  assert.equal(byId['inb-1'].reqSource, 'override');
+
+  const assigned = assignRequirements(
+    [{ id: 'x1', title: '1120 | 设计 | Q137 延时分析', projectKey: 'p-coco' }],
+    { requirementOverrides: {} },
+  );
+  assert.equal(assigned[0].reqKey, 'ISSUE:Q137');
+});
+
+test('SidebarCollector reads group_id from SQLite and live requirementOverrides from preferences.json', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-ps-col-ov-'));
+  const dbPath = join(dir, 'conversation_summaries.db');
+  const prefsPath = join(dir, 'preferences.json');
+  try {
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE conversation_summaries (
+        conversation_id TEXT PRIMARY KEY,
+        title TEXT,
+        status TEXT,
+        project_id TEXT,
+        workspace_uris TEXT,
+        not_fully_idle INTEGER,
+        nesting_depth INTEGER,
+        killed INTEGER,
+        last_modified_time TEXT,
+        group_id TEXT
+      );
+      INSERT INTO conversation_summaries VALUES
+        ('c-ov', 'Uncategorized chat', 'CASCADE_RUN_STATUS_IDLE', 'p1', '["file:///tmp/ws/p1"]', 0, 0, 0, '2026-11-20 10:00:00+00:00', 'convgroup:alpha'),
+        ('c-cg', 'Another chat', 'CASCADE_RUN_STATUS_IDLE', 'p1', '["file:///tmp/ws/p1"]', 0, 0, 0, '2026-11-20 09:00:00+00:00', 'convgroup:alpha');
+    `);
+    db.close();
+
+    writeFileSync(prefsPath, JSON.stringify({
+      requirementOverrides: { 'c-ov': { key: 'MUL-900', label: 'MUL-900 Sidecar Override' } },
+    }));
+
+    const collector = new SidebarCollector({
+      conversationsDb: dbPath,
+      preferences: prefsPath,
+      pluginConfig: join(dir, 'missing-config.json'),
+    });
+    collector.fetchProjectsCached = async () => ({ fetchedAt: Date.now(), rawProjects: [], sidecarProjectIds: new Set() });
+
+    const snap1 = await collector.snapshot();
+    const m1 = Object.fromEntries(snap1.conversations.map(c => [c.id, c]));
+    assert.equal(m1['c-ov'].reqKey, 'ISSUE:MUL-900');
+    assert.equal(m1['c-ov'].reqSource, 'override');
+    assert.equal(m1['c-cg'].reqKey, 'convgroup:alpha');
+    assert.equal(m1['c-cg'].reqSource, 'group_id');
+
+    // Updating preferences.json invalidates snapshot cache automatically even without force=true
+    writeFileSync(prefsPath, JSON.stringify({ requirementOverrides: {} }));
+    const snap2 = await collector.snapshot();
+    const m2 = Object.fromEntries(snap2.conversations.map(c => [c.id, c]));
+    assert.equal(m2['c-ov'].reqKey, 'convgroup:alpha');
+    assert.equal(m2['c-ov'].reqCount, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -112,56 +112,220 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     return { kind: 'inbox', key: 'INBOX', shortId: '', label: '', scopeByProject: false };
   }
 
-  function assignRequirements(convs) {
-    const prepared = convs.map(c => ({
-      conv: c,
-      projectKey: c.projectKey || '__unassigned__',
-      desc: extractRequirementDescriptor(c.title),
-    }));
+  function resolveRequirementOverrideDescriptor(overrideEntry, projectKey = '__unassigned__') {
+    if (!overrideEntry || typeof overrideEntry !== 'object' || Array.isArray(overrideEntry)) return null;
+    const rawKey = typeof overrideEntry.key === 'string' ? overrideEntry.key.replace(/\s+/g, ' ').trim() : '';
+    if (!rawKey) return null;
+    if (rawKey.toUpperCase() === 'INBOX') {
+      return { kind: 'inbox', key: 'INBOX', effectiveKey: 'INBOX', label: '', scopeByProject: false };
+    }
+    const rawLabel = typeof overrideEntry.label === 'string' ? overrideEntry.label.replace(/\s+/g, ' ').trim() : '';
+    if (rawKey.includes('::')) {
+      const kind = rawKey.includes('::THEME:') ? 'theme' : 'issue';
+      const fallback = rawKey.split('::').slice(1).join('::');
+      return { kind, key: rawKey, effectiveKey: rawKey, label: cleanRequirementLabel(rawLabel, fallback), scopeByProject: false };
+    }
+    let m = rawKey.match(/^ISSUE:(.+)$/i);
+    if (m) {
+      const inner = m[1].trim();
+      if (/^[1-9]\d*$/.test(inner)) {
+        const key = `ISSUE:${inner}`;
+        return {
+          kind: 'issue',
+          key,
+          effectiveKey: `${projectKey}::${key}`,
+          label: cleanRequirementLabel(rawLabel, `Issue ${inner}`),
+          scopeByProject: true,
+        };
+      }
+      const upper = inner.toUpperCase();
+      const key = `ISSUE:${upper}`;
+      return {
+        kind: 'issue',
+        key,
+        effectiveKey: key,
+        label: cleanRequirementLabel(rawLabel, upper),
+        scopeByProject: false,
+      };
+    }
+    m = rawKey.match(/^PR:([1-9]\d*)$/i);
+    if (m) {
+      const key = `PR:${m[1]}`;
+      return {
+        kind: 'issue',
+        key,
+        effectiveKey: `${projectKey}::${key}`,
+        label: cleanRequirementLabel(rawLabel, `PR ${m[1]}`),
+        scopeByProject: true,
+      };
+    }
+    if (/^(#[1-9]\d*|Issue\s*#?\s*[1-9]\d*|PR\s*#?\s*[1-9]\d*|[Qq]\d+|[A-Za-z][A-Za-z0-9]{1,9}-\d+)$/i.test(rawKey)) {
+      const info = normalizeIssueToken(rawKey);
+      if (!TECH_ID_RE.test(info.shortId)) {
+        return {
+          kind: 'issue',
+          key: info.key,
+          effectiveKey: info.scopeByProject ? `${projectKey}::${info.key}` : info.key,
+          label: cleanRequirementLabel(rawLabel, info.fallbackLabel),
+          scopeByProject: info.scopeByProject,
+        };
+      }
+    }
+    m = rawKey.match(/^THEME:(.+)$/i);
+    if (m) {
+      const themeName = m[1].trim();
+      const key = `THEME:${themeName.toLowerCase()}`;
+      return {
+        kind: 'theme',
+        key,
+        effectiveKey: `${projectKey}::${key}`,
+        label: cleanRequirementLabel(rawLabel, themeName),
+        scopeByProject: true,
+      };
+    }
+    const bracketMatch = rawKey.match(BRACKET_THEME_RE);
+    if (bracketMatch) {
+      const tag = (bracketMatch[1] || bracketMatch[2] || '').trim();
+      if (tag) {
+        const key = `THEME:${tag.toLowerCase()}`;
+        return {
+          kind: 'theme',
+          key,
+          effectiveKey: `${projectKey}::${key}`,
+          label: cleanRequirementLabel(rawLabel, tag),
+          scopeByProject: true,
+        };
+      }
+    }
+    if (/^convgroup:/i.test(rawKey)) {
+      const slug = rawKey.slice('convgroup:'.length).trim();
+      const key = `convgroup:${slug}`;
+      return {
+        kind: 'convgroup',
+        key,
+        effectiveKey: key,
+        label: cleanRequirementLabel(rawLabel, slug || rawKey),
+        scopeByProject: false,
+      };
+    }
+    const key = rawKey.includes(':') ? rawKey : `OVERRIDE:${rawKey}`;
+    return {
+      kind: 'override',
+      key,
+      effectiveKey: key,
+      label: cleanRequirementLabel(rawLabel, rawKey),
+      scopeByProject: false,
+    };
+  }
+
+  function resolveGroupIdDescriptor(groupId, groupLabel = '') {
+    const raw = String(groupId || '').replace(/\s+/g, ' ').trim();
+    if (!raw) return null;
+    const hasPrefix = /^convgroup:/i.test(raw);
+    const slug = hasPrefix ? raw.slice('convgroup:'.length).trim() : raw;
+    if (!slug) return null;
+    const key = `convgroup:${slug}`;
+    return {
+      kind: 'convgroup',
+      key,
+      effectiveKey: key,
+      label: cleanRequirementLabel(groupLabel || slug, key),
+      scopeByProject: false,
+    };
+  }
+
+  function assignRequirements(convs, opts = {}) {
+    const overrides = opts?.requirementOverrides && typeof opts.requirementOverrides === 'object'
+      ? opts.requirementOverrides
+      : {};
+    const prepared = (convs || []).map(c => {
+      const projectKey = c.projectKey || '__unassigned__';
+      const tier1 = c.id ? resolveRequirementOverrideDescriptor(overrides[c.id], projectKey) : null;
+      const desc = tier1 ? null : extractRequirementDescriptor(c.title);
+      return { conv: c, projectKey, tier1, desc };
+    });
 
     const themeCounts = new Map();
-    const issueCounts = new Map();
-    const issueLabels = new Map();
+    const groupCounts = new Map();
+    const overrideLabels = new Map();
+    const groupLabels = new Map();
     for (const p of prepared) {
-      if (p.desc.kind === 'theme-candidate') {
+      if (p.desc?.kind === 'theme-candidate') {
         const scopeKey = `${p.projectKey}::${p.desc.key}`;
         themeCounts.set(scopeKey, (themeCounts.get(scopeKey) || 0) + 1);
-      } else if (p.desc.kind === 'issue') {
-        const effectiveKey = p.desc.scopeByProject
-          ? `${p.projectKey}::${p.desc.key}`
-          : p.desc.key;
-        p.effectiveIssueKey = effectiveKey;
-        issueCounts.set(effectiveKey, (issueCounts.get(effectiveKey) || 0) + 1);
-        const existing = issueLabels.get(effectiveKey);
-        if (!existing || p.desc.label.length > existing.length) {
-          issueLabels.set(effectiveKey, p.desc.label);
-        }
       }
     }
 
-    return prepared.map(p => {
+    const resolved = prepared.map(p => {
       let reqKey = 'INBOX';
       let reqLabel = '';
       let reqKind = 'inbox';
-      let reqCount = 1;
+      let reqSource = 'inbox';
 
-      if (p.desc.kind === 'issue') {
-        reqKey = p.effectiveIssueKey;
-        reqLabel = issueLabels.get(reqKey) || p.desc.label;
+      if (p.tier1) {
+        reqSource = 'override';
+        if (p.tier1.kind !== 'inbox') {
+          reqKey = p.tier1.effectiveKey;
+          reqKind = p.tier1.kind;
+          reqLabel = p.tier1.label;
+        }
+      } else if (p.desc?.kind === 'issue') {
+        reqSource = 'title';
+        reqKey = p.desc.scopeByProject ? `${p.projectKey}::${p.desc.key}` : p.desc.key;
         reqKind = 'issue';
-        reqCount = issueCounts.get(reqKey) || 1;
-      } else if (p.desc.kind === 'theme-candidate') {
+        reqLabel = p.desc.label;
+      } else if (p.desc?.kind === 'theme-candidate') {
         const scopeKey = `${p.projectKey}::${p.desc.key}`;
-        const count = themeCounts.get(scopeKey) || 0;
-        if (count >= 2) {
+        if ((themeCounts.get(scopeKey) || 0) >= 2) {
+          reqSource = 'title';
           reqKey = scopeKey;
-          reqLabel = p.desc.label;
           reqKind = 'theme';
-          reqCount = count;
+          reqLabel = p.desc.label;
         }
       }
 
-      return { ...p.conv, reqKey, reqLabel, reqKind, reqCount };
+      if (reqKey === 'INBOX' && reqSource === 'inbox') {
+        if (p.conv.reqSource === 'group_id' && p.conv.reqKey && p.conv.reqKey !== 'INBOX') {
+          reqSource = 'group_id';
+          reqKey = p.conv.reqKey;
+          reqKind = p.conv.reqKind || 'convgroup';
+          reqLabel = p.conv.reqLabel || reqKey;
+        } else {
+          const tier3 = resolveGroupIdDescriptor(p.conv.groupId ?? p.conv.group_id, p.conv.groupLabel ?? p.conv.group_label ?? '');
+          if (tier3) {
+            reqSource = 'group_id';
+            reqKey = tier3.effectiveKey;
+            reqKind = 'convgroup';
+            reqLabel = tier3.label;
+          }
+        }
+      }
+
+      if (reqKey !== 'INBOX') {
+        groupCounts.set(reqKey, (groupCounts.get(reqKey) || 0) + 1);
+        if (reqSource === 'override') {
+          const prev = overrideLabels.get(reqKey);
+          if (!prev || reqLabel.length > prev.length) overrideLabels.set(reqKey, reqLabel);
+        }
+        const prevAny = groupLabels.get(reqKey);
+        if (!prevAny || reqLabel.length > prevAny.length) groupLabels.set(reqKey, reqLabel);
+      }
+
+      return { conv: p.conv, reqKey, reqLabel, reqKind, reqSource };
+    });
+
+    return resolved.map(r => {
+      if (r.reqKey === 'INBOX') {
+        return { ...r.conv, reqKey: 'INBOX', reqLabel: '', reqKind: 'inbox', reqCount: 1, reqSource: r.reqSource };
+      }
+      return {
+        ...r.conv,
+        reqKey: r.reqKey,
+        reqLabel: overrideLabels.get(r.reqKey) || groupLabels.get(r.reqKey) || r.reqLabel,
+        reqKind: r.reqKind,
+        reqCount: groupCounts.get(r.reqKey) || 1,
+        reqSource: r.reqSource,
+      };
     });
   }
 
@@ -177,6 +341,21 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     return sg === 'in_progress' || sg === 'blocked';
   }
 
+  function getSortTimestampMs(conv, sortBy = 'last_updated') {
+    if (sortBy === 'last_user_prompt') {
+      return Number(conv?.userInputAtMs || conv?.updatedAtMs || 0);
+    }
+    return Number(conv?.updatedAtMs || 0);
+  }
+
+  function collectUnreadIds(convs) {
+    const ids = [];
+    for (const c of convs || []) {
+      if (c && c.id && (c.isUnread || c.markedAsUnread)) ids.push(c.id);
+    }
+    return ids;
+  }
+
   function formatRelativeTime(ms) {
     if (!ms) return '';
     const diff = Date.now() - ms;
@@ -188,7 +367,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     return `${d.getMonth() + 1}/${d.getDate()}`;
   }
 
-  function compareInternalRows(a, b) {
+  function compareInternalRows(a, b, sortBy = 'last_updated') {
     const rank = c => {
       const sg = getStatusGroup(c);
       if (sg === 'blocked') return 0;
@@ -198,10 +377,10 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     const ra = rank(a);
     const rb = rank(b);
     if (ra !== rb) return ra - rb;
-    return (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
+    return getSortTimestampMs(b, sortBy) - getSortTimestampMs(a, sortBy);
   }
 
-  function buildReqClusters(convs) {
+  function buildReqClusters(convs, sortBy = 'last_updated') {
     const byReq = new Map();
     const standaloneRows = [];
     for (const c of convs) {
@@ -216,17 +395,19 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     const clusters = [];
     for (const [reqKey, groupItems] of byReq.entries()) {
       if (!groupItems.length) continue;
-      const sorted = [...groupItems].sort(compareInternalRows);
+      const sorted = [...groupItems].sort((a, b) => compareInternalRows(a, b, sortBy));
       let blockedCount = 0;
       let runningCount = 0;
       let unreadCount = 0;
+      const unreadIds = [];
       let latestMs = 0;
       let latestActiveMs = 0;
       let bestLabel = sorted[0]?.reqLabel || reqKey;
 
       for (const it of sorted) {
         const sg = getStatusGroup(it);
-        const ms = it.updatedAtMs || 0;
+        const ms = getSortTimestampMs(it, sortBy);
+        if (it.isUnread || it.markedAsUnread) unreadIds.push(it.id);
         if (sg === 'blocked') {
           blockedCount += 1;
           if (ms > latestActiveMs) latestActiveMs = ms;
@@ -252,6 +433,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         blockedCount,
         runningCount,
         unreadCount,
+        unreadIds,
         isUnread: unreadCount > 0,
         highestStatus,
         latestMs,
@@ -290,6 +472,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       _agyRunning: cluster.runningCount + cluster.blockedCount,
       _agyBlocked: cluster.blockedCount,
       _agyUnread: cluster.unreadCount,
+      _agyUnreadIds: cluster.unreadIds || [],
       _agyTotal: cluster.items.length,
       _agyLatestMs: cluster.latestMs,
     };
@@ -339,7 +522,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     const isCollapsed = resolveHeaderCollapse(standaloneRows, inboxToggleKey, true, opts);
     let runningCount = 0;
     let unreadCount = 0;
+    const unreadIds = [];
     for (const c of standaloneRows) {
+      if (c.isUnread || c.markedAsUnread) unreadIds.push(c.id);
       if (isActiveConv(c)) runningCount += 1;
       else if (c.isUnread) unreadCount += 1;
     }
@@ -358,6 +543,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         _agyToggleKey: inboxToggleKey,
         _agyRunning: runningCount,
         _agyUnread: unreadCount,
+        _agyUnreadIds: unreadIds,
       },
     };
   }
@@ -381,6 +567,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       _agyRunning: cluster.runningCount + cluster.blockedCount,
       _agyBlocked: cluster.blockedCount,
       _agyUnread: cluster.unreadCount,
+      _agyUnreadIds: cluster.unreadIds || [],
       _agyTotal: cluster.items.length,
       _agyLatestMs: cluster.latestMs,
     });
@@ -625,7 +812,11 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
     const inboxToggleKey = 'col:inbox';
     const isInboxCollapsed = resolveHeaderCollapse(inboxEntries.map(e => e.conv), inboxToggleKey, false, opts);
-    const inboxUnreadCount = inboxEntries.filter(e => Boolean(e.conv.isUnread) || Boolean(e.cls.isWoke) || Boolean(e.cls.isManualUnread)).length;
+    const inboxUnreadIds = inboxEntries
+      .filter(e => Boolean(e.conv.isUnread) || Boolean(e.cls.isWoke) || Boolean(e.cls.isManualUnread))
+      .map(e => e.conv.id)
+      .filter(Boolean);
+    const inboxUnreadCount = inboxUnreadIds.length;
 
     out.push({
       type: 'header',
@@ -639,6 +830,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       _agyDepth: 0,
       _agyToggleKey: inboxToggleKey,
       _agyUnread: inboxUnreadCount,
+      _agyUnreadIds: inboxUnreadIds,
     });
 
     if (!isInboxCollapsed && inboxEntries.length > 0) {
@@ -708,8 +900,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   function buildStatusRequirementItems(convs, prefixPath, depth, opts) {
-    const { collapsedSet, expandedLimits, t, isHistory } = opts;
-    const { clusters, standaloneRows } = buildReqClusters(convs);
+    const { t, isHistory } = opts;
+    const sortBy = opts.sortBy || 'last_updated';
+    const { clusters, standaloneRows } = buildReqClusters(convs, sortBy);
 
     const buckets = {
       blocked: { key: 'blocked', nativeId: 'status-blocked', label: t.statusBlocked, iconName: 'error', entries: [], rawCount: 0 },
@@ -720,13 +913,14 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     for (const c of standaloneRows) {
       const sg = getStatusGroup(c);
       const b = buckets[sg] || buckets.idle;
+      const ts = getSortTimestampMs(c, sortBy);
       b.rawCount += 1;
       b.entries.push({
         kind: 'single',
         conv: c,
         isUnread: Boolean(c.isUnread),
-        latestMs: c.updatedAtMs || 0,
-        latestActiveMs: c.updatedAtMs || 0,
+        latestMs: ts,
+        latestActiveMs: ts,
       });
     }
 
@@ -761,6 +955,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       const statusToggleKey = `col:${statusPathKey}`;
       const bucketConvs = bucket.entries.flatMap(e => (e.kind === 'single' ? [e.conv] : e.items));
       const isStatusCollapsed = resolveHeaderCollapse(bucketConvs, statusToggleKey, false, opts);
+      const unreadIds = collectUnreadIds(bucketConvs);
 
       out.push({
         type: 'header',
@@ -773,6 +968,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         _agyDepth: depth,
         _agyToggleKey: statusToggleKey,
         _agyStatusKey: bKey,
+        _agyUnread: bKey === 'idle' ? unreadIds.length : 0,
+        _agyUnreadIds: unreadIds,
       });
 
       if (isStatusCollapsed) continue;
@@ -826,7 +1023,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
   function buildRequirementOnlyItems(convs, prefixPath, depth, opts) {
     const { t } = opts;
-    const { clusters, standaloneRows } = buildReqClusters(convs);
+    const sortBy = opts.sortBy || 'last_updated';
+    const { clusters, standaloneRows } = buildReqClusters(convs, sortBy);
     const sortedClusters = sortReqClusters(clusters);
 
     const pageKey = prefixPath || 'root:requirement';
@@ -854,7 +1052,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         const sortedStandalone = [...standaloneRows].sort((a, b) => {
           if (isActiveConv(a) !== isActiveConv(b)) return isActiveConv(a) ? -1 : 1;
           if (Boolean(a.isUnread) !== Boolean(b.isUnread)) return a.isUnread ? -1 : 1;
-          return (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
+          return getSortTimestampMs(b, sortBy) - getSortTimestampMs(a, sortBy);
         });
         const visStandalone = sliceWithReveal(sortedStandalone, 40, inboxPathKey, opts?._revealMatchFn, opts);
         const childGroupId = `agy-nested-d${Math.min(Math.max(depth, 1), 3)}:${inboxPathKey}`;
@@ -876,7 +1074,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     return out;
   }
 
-  function partitionByDimension(items, dim, t) {
+  function partitionByDimension(items, dim, t, sortBy = 'last_updated') {
     if (dim === 'status') {
       const buckets = {
         blocked: { key: 'status:blocked', nativeId: 'status-blocked', label: t.statusBlocked, iconName: 'error', items: [], isFallback: false },
@@ -940,7 +1138,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       const g = map.get(rawKey);
       g.items.push(c);
       if (isActiveConv(c)) g.activeCount += 1;
-      if ((c.updatedAtMs || 0) > g.latestMs) g.latestMs = c.updatedAtMs || 0;
+      const ts = getSortTimestampMs(c, sortBy);
+      if (ts > g.latestMs) g.latestMs = ts;
     }
 
     const named = [];
@@ -958,13 +1157,13 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     return named;
   }
 
-  function buildNestedTree(items, dims, depth, pathPrefix, t) {
+  function buildNestedTree(items, dims, depth, pathPrefix, t, sortBy = 'last_updated') {
     if (depth >= dims.length) return [];
-    const buckets = partitionByDimension(items, dims[depth], t);
+    const buckets = partitionByDimension(items, dims[depth], t, sortBy);
     return buckets.map(b => {
       const pathKey = pathPrefix ? `${pathPrefix}/${b.key}` : b.key;
       const children = depth + 1 < dims.length
-        ? buildNestedTree(b.items, dims, depth + 1, pathKey, t)
+        ? buildNestedTree(b.items, dims, depth + 1, pathKey, t, sortBy)
         : null;
       return {
         ...b,
@@ -977,11 +1176,12 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
   function emitGenericDims(convs, dims, prefixPath, depth, opts) {
     const { t } = opts;
+    const sortBy = opts.sortBy || 'last_updated';
     if (dims.length === 0) {
       const sorted = [...convs].sort((a, b) => {
         if (isActiveConv(a) !== isActiveConv(b)) return isActiveConv(a) ? -1 : 1;
         if (Boolean(a.isUnread) !== Boolean(b.isUnread)) return a.isUnread ? -1 : 1;
-        return (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
+        return getSortTimestampMs(b, sortBy) - getSortTimestampMs(a, sortBy);
       });
       const key = prefixPath || 'root:none';
       const visible = sliceWithReveal(sorted, 60, key, opts?._revealMatchFn, opts);
@@ -1013,12 +1213,13 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         return buildStatusRequirementItems(convs, prefixPath, depth, opts);
       }
       const [headDim, ...tailOuter] = outerDims;
-      const buckets = partitionByDimension(convs, headDim, t);
+      const buckets = partitionByDimension(convs, headDim, t, sortBy);
       const out = [];
       for (const b of buckets) {
         const pathKey = prefixPath ? `${prefixPath}/${b.key}` : b.key;
         const toggleKey = `col:${pathKey}`;
         const isCollapsed = resolveHeaderCollapse(b.items, toggleKey, false, opts);
+        const unreadIds = collectUnreadIds(b.items);
         out.push({
           type: 'header',
           id: `header-agy:${pathKey}`,
@@ -1029,6 +1230,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
           _agyIconName: b.iconName,
           _agyDepth: depth,
           _agyToggleKey: toggleKey,
+          _agyUnread: unreadIds.length,
+          _agyUnreadIds: unreadIds,
         });
         if (!isCollapsed) {
           out.push(...emitGenericDims(b.items, [...tailOuter, 'status', 'requirement'], pathKey, depth + 1, opts));
@@ -1043,7 +1246,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
     const [headDim, ...restDims] = dims;
     if (headDim === 'requirement') {
-      const { clusters, standaloneRows } = buildReqClusters(convs);
+      const { clusters, standaloneRows } = buildReqClusters(convs, sortBy);
       const sortedClusters = sortReqClusters(clusters);
       const pageKey = prefixPath ? `${prefixPath}/req:groups` : 'root:requirement';
       const visible = sliceWithReveal(sortedClusters, 40, pageKey, c => c.items.some(opts?._revealMatchFn || (() => false)), opts);
@@ -1076,7 +1279,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       return out;
     }
 
-    const buckets = partitionByDimension(convs, headDim, t);
+    const buckets = partitionByDimension(convs, headDim, t, sortBy);
     const out = [];
     const inboxInsert = depth === 0 && headDim === 'status' && Array.isArray(opts._inboxItemsBeforeIdle) && opts._inboxItemsBeforeIdle.length > 0
       ? opts._inboxItemsBeforeIdle
@@ -1090,6 +1293,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       const pathKey = prefixPath ? `${prefixPath}/${b.key}` : b.key;
       const toggleKey = `col:${pathKey}`;
       const isCollapsed = resolveHeaderCollapse(b.items, toggleKey, false, opts);
+      const unreadIds = collectUnreadIds(b.items);
       out.push({
         type: 'header',
         id: depth === 0 && b.nativeId ? `header-${b.nativeId}` : `header-agy:${pathKey}`,
@@ -1100,6 +1304,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         _agyIconName: b.iconName,
         _agyDepth: depth,
         _agyToggleKey: toggleKey,
+        _agyUnread: headDim === 'status' ? (b.key === 'status:idle' ? unreadIds.length : 0) : unreadIds.length,
+        _agyUnreadIds: unreadIds,
       });
       if (isCollapsed) continue;
       if (restDims.length > 0) {
@@ -1107,7 +1313,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       } else {
         const sorted = [...b.items].sort((a, b2) => {
           if (Boolean(a.isUnread) !== Boolean(b2.isUnread)) return a.isUnread ? -1 : 1;
-          return (b2.updatedAtMs || 0) - (a.updatedAtMs || 0);
+          return getSortTimestampMs(b2, sortBy) - getSortTimestampMs(a, sortBy);
         });
         const baseLimit = !opts.isHistory && (b.isFallback || sorted.length > 40) ? 40 : sorted.length;
         const visible = sliceWithReveal(sorted, baseLimit, pathKey, opts?._revealMatchFn, opts);
@@ -1153,12 +1359,13 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       expandReadIdle: '▸ 展开其余 {n} 条已读空闲会话',
       collapseReadIdle: '▾ 收起 {n} 条已读空闲会话',
     };
-    const scoped = assignRequirements(convs || []);
+    const scoped = assignRequirements(convs || [], { requirementOverrides: opts.requirementOverrides });
     const collapsedSet = opts.collapsedSet instanceof Set ? opts.collapsedSet : new Set(opts.collapsedKeys || []);
     const expandedReadIdleGroups = opts.expandedReadIdleGroups instanceof Set ? opts.expandedReadIdleGroups : new Set(opts.expandedReadIdleKeys || []);
     const expandedLimits = opts.expandedLimits || {};
     const activeChatId = opts.activeChatId || null;
     const isHistory = Boolean(opts.isHistory);
+    const sortBy = opts.sortBy || 'last_updated';
     const dimList = dims || [];
 
     const inboxPrefs = opts.inbox && opts.inbox.enabled !== false && !isHistory ? opts.inbox : null;
@@ -1168,6 +1375,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       expandedLimits,
       activeChatId,
       isHistory,
+      sortBy,
       t,
       _revealMatchFn: opts._revealMatchFn,
       _revealOut: opts._revealOut,
@@ -1236,10 +1444,250 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     };
   }
 
+  const VALID_DIMS = ['project', 'requirement', 'repo', 'location', 'status'];
+
+  function getEffectiveDimsFromState(prefs, detectedNativeDim) {
+    if (Array.isArray(prefs?.groupByDimensions)) {
+      return prefs.groupByDimensions.filter(d => VALID_DIMS.includes(d));
+    }
+    if (detectedNativeDim && detectedNativeDim !== 'none' && VALID_DIMS.includes(detectedNativeDim)) {
+      return [detectedNativeDim];
+    }
+    return [];
+  }
+
+  function shouldUseCustomGrouping({ prefs, detectedNativeDim }) {
+    const dims = getEffectiveDimsFromState(prefs, detectedNativeDim);
+    if (dims.length === 0) return false;
+    if (dims.length === 1 && dims[0] !== 'requirement') {
+      return Boolean(detectedNativeDim && dims[0] !== detectedNativeDim);
+    }
+    return true;
+  }
+
+  function estimateItemTopPx(items, targetIdx, rawProps = null) {
+    const rowHeight = rawProps?.subtitleContext?.setting === 'on' ? 49 : 33;
+    let top = 0;
+    const end = Math.min(targetIdx, (items || []).length);
+    for (let i = 0; i < end; i += 1) {
+      const it = items[i];
+      const type = it?.type;
+      if (type === 'section-header') top += 24;
+      else if (type === 'header') top += 37;
+      else if (type === 'show-more' || type === 'empty-placeholder') top += 32;
+      else if (type === 'sidebar-agent') top += 33;
+      else if (type === 'spacer') top += Number(it?.height) || 16;
+      else top += rowHeight;
+    }
+    return top;
+  }
+
+  function isPrefixSectionItem(it) {
+    if (!it || typeof it !== 'object') return false;
+    if (it.type === 'sidebar-agent' || it.type === 'empty-placeholder' || it.type === 'spacer') return true;
+    const cid = String(it.collapseId || '');
+    const id = String(it.id || '');
+    const gid = String(it.groupId || '');
+    if (it.type === 'section-header') {
+      return cid === 'section-coordinator' || cid === 'pinned' || cid === 'section-pinned'
+        || cid.startsWith('convgroup:') || id.startsWith('header-convgroup:');
+    }
+    if (it.type === 'header') {
+      return Boolean(it.folderId) || gid === 'pinned' || gid.startsWith('convgroup:');
+    }
+    if (it.type === 'row') {
+      return gid === 'section-coordinator' || gid === 'pinned' || gid.startsWith('convgroup:');
+    }
+    return false;
+  }
+
+  function splitPrefixAndMainItems(items, isHistory = false) {
+    const list = Array.isArray(items) ? items : [];
+    if (isHistory) {
+      return { prefixItems: [], mainHdr: null, postMainItems: list };
+    }
+    const mainIdx = list.findIndex(
+      it => it?.type === 'section-header' && (it.id === 'main-section-header' || it.collapseId === 'main-section-header'),
+    );
+    if (mainIdx >= 0) {
+      return {
+        prefixItems: list.slice(0, mainIdx + 1),
+        mainHdr: list[mainIdx],
+        postMainItems: list.slice(mainIdx + 1),
+      };
+    }
+    let prefixEnd = 0;
+    while (prefixEnd < list.length && isPrefixSectionItem(list[prefixEnd])) {
+      prefixEnd += 1;
+    }
+    return {
+      prefixItems: list.slice(0, prefixEnd),
+      mainHdr: null,
+      postMainItems: list.slice(prefixEnd),
+    };
+  }
+
+  function normalizeActiveFilters(filterBy, customFilters) {
+    const out = new Set();
+    const pushVal = val => {
+      if (typeof val !== 'string') return;
+      const trimmed = val.trim();
+      if (!trimmed || trimmed === 'all' || trimmed === 'none') return;
+      out.add(trimmed);
+    };
+    if (typeof filterBy === 'string') {
+      pushVal(filterBy);
+    } else if (filterBy instanceof Set || Array.isArray(filterBy)) {
+      for (const item of filterBy) pushVal(item);
+    } else if (filterBy && typeof filterBy === 'object') {
+      for (const [k, v] of Object.entries(filterBy)) {
+        if (v === true) pushVal(k);
+        else if (typeof v === 'string') pushVal(v);
+        else if (Array.isArray(v) || v instanceof Set) {
+          for (const item of v) pushVal(item);
+        }
+      }
+    }
+    if (Array.isArray(customFilters)) {
+      for (const cf of customFilters) {
+        if (cf && typeof cf === 'object' && (cf.enabled === true || cf.active === true || cf.checked === true) && cf.id) {
+          pushVal(cf.id);
+        }
+      }
+    }
+    return [...out];
+  }
+
+  function findPropsWithSettings(node, depth = 0) {
+    if (!node || typeof node !== 'object' || depth > 4) return null;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const found = findPropsWithSettings(child, depth + 1);
+        if (found) return found;
+      }
+      return null;
+    }
+    const props = node.props;
+    if (props && typeof props === 'object') {
+      if (
+        typeof props.sortBy === 'string'
+        || typeof props.groupBy === 'string'
+        || props.filterBy !== undefined
+      ) {
+        return props;
+      }
+      if (props.children !== undefined) {
+        const found = findPropsWithSettings(props.children, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  function extractNativeSidebarSettings(rawProps, mainHdr) {
+    const hdrProps = findPropsWithSettings(mainHdr?.headerActions);
+    const groupBy = rawProps?.subtitleContext?.groupBy || hdrProps?.groupBy || null;
+    const sortBy = typeof hdrProps?.sortBy === 'string' ? hdrProps.sortBy : 'last_updated';
+    const activeFilters = normalizeActiveFilters(hdrProps?.filterBy, hdrProps?.customFilters);
+    return {
+      groupBy,
+      sortBy,
+      activeFilters,
+      archivedOnly: Boolean(hdrProps?.archivedOnly),
+    };
+  }
+
+  function matchesNativeFilter(conv, rawEntry, activeFilters, visibleRowIds, nowMs = Date.now()) {
+    if (!Array.isArray(activeFilters) || activeFilters.length === 0) return true;
+    if (visibleRowIds && visibleRowIds.has(conv.id)) return true;
+
+    const envFilters = activeFilters.filter(f => f === 'env:local' || f === 'env:cloud');
+    if (envFilters.length > 0) {
+      const targetEnv = conv.envKind === 'cloud' ? 'env:cloud' : 'env:local';
+      if (!envFilters.includes(targetEnv)) return false;
+    }
+
+    const meta = rawEntry?.summary?.trajectoryMetadata || {};
+    const srcMeta = meta.sourceMetadata || {};
+    const ann = rawEntry?.summary?.annotations || {};
+
+    for (const f of activeFilters) {
+      if (f === 'env:local' || f === 'env:cloud') continue;
+      if (f === 'last_7_days') {
+        const latestTs = Math.max(Number(conv.updatedAtMs || 0), Number(conv.userInputAtMs || 0));
+        if (!(latestTs >= nowMs - 7 * 86400_000)) return false;
+        continue;
+      }
+      if (f === 'scheduled') {
+        const isSched = Boolean(meta.scheduled || meta.isScheduled || meta.automationId || ann.scheduled || conv.isScheduled);
+        if (!isSched) return false;
+        continue;
+      }
+      if (f === 'plugins') {
+        const isPlug = Boolean(meta.pluginId || srcMeta.pluginId || ann.pluginId || conv.isPlugin);
+        if (!isPlug) return false;
+        continue;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  function findAnnotationsContext(startFiber) {
+    let f = startFiber;
+    let hops = 0;
+    while (f && hops < 45) {
+      let dep = f.dependencies?.firstContext;
+      while (dep) {
+        if (typeof dep.memoizedValue?.updateConversationAnnotations === 'function') {
+          return dep.memoizedValue;
+        }
+        dep = dep.next;
+      }
+      if (typeof f.memoizedProps?.value?.updateConversationAnnotations === 'function') {
+        return f.memoizedProps.value;
+      }
+      if (typeof f.memoizedProps?.updateConversationAnnotations === 'function') {
+        return f.memoizedProps;
+      }
+      f = f.return;
+      hops += 1;
+    }
+    return null;
+  }
+
+  function markGroupConversationsAsRead(cascadeIds, { updateConversationAnnotations, localViewedMs, nowMs = Date.now() } = {}) {
+    const uniqueIds = [...new Set((cascadeIds || []).filter(id => typeof id === 'string' && id))];
+    if (!uniqueIds.length || typeof updateConversationAnnotations !== 'function') {
+      return { ok: false, count: 0, undo: null };
+    }
+    const prevLocal = new Map();
+    if (localViewedMs instanceof Map) {
+      for (const id of uniqueIds) {
+        prevLocal.set(id, localViewedMs.has(id) ? localViewedMs.get(id) : null);
+        localViewedMs.set(id, nowMs);
+      }
+    }
+    const ts = { seconds: Math.floor(nowMs / 1000), nanos: (nowMs % 1000) * 1e6 };
+    updateConversationAnnotations(uniqueIds, { markedAsUnread: false, lastUserViewTime: ts }, true);
+    const undo = () => {
+      if (localViewedMs instanceof Map) {
+        for (const [id, oldVal] of prevLocal.entries()) {
+          if (oldVal === null) localViewedMs.delete(id);
+          else localViewedMs.set(id, oldVal);
+        }
+      }
+      updateConversationAnnotations(uniqueIds, { markedAsUnread: true }, true);
+    };
+    return { ok: true, count: uniqueIds.length, undo };
+  }
+
   if (testEnv && testEnv.__unitTestOnly) {
     return {
       parseSessionTitle,
       extractRequirementDescriptor,
+      resolveRequirementOverrideDescriptor,
+      resolveGroupIdDescriptor,
       assignRequirements,
       partitionByDimension,
       buildNestedTree,
@@ -1247,6 +1695,14 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       partitionInboxBuckets,
       buildVirtualItemsForDims,
       resolveRevealPlan,
+      getEffectiveDimsFromState,
+      shouldUseCustomGrouping,
+      estimateItemTopPx,
+      splitPrefixAndMainItems,
+      extractNativeSidebarSettings,
+      matchesNativeFilter,
+      findAnnotationsContext,
+      markGroupConversationsAsRead,
     };
   }
 
@@ -1257,7 +1713,6 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   const STYLE_ID = 'agy-project-sidebar-style';
   const MENU_OPT_ID = 'agy-group-by-option-requirement';
   const MANAGED_GROUP_CLASS = 'agy-req-submenu-managed';
-  const VALID_DIMS = ['project', 'requirement', 'repo', 'location', 'status'];
 
   const CHECK_MASK_URI = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 -960 960 960'%3E%3Cpath fill='black' d='M382-339.38L727.54-684.92q8.92-8.92 20.88-9.12t21.27 9.12T779-663.54t-9.31 21.38l-362.38 363Q396.46-268.31 382-268.31t-25.31-10.85l-167-167q-8.92-8.92-8.81-21.19t9.42-21.58t21.38-9.31t21.38 9.31L382-339.38Z'/%3E%3C/svg%3E")`;
 
@@ -1274,6 +1729,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     inbox: 'M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-120H640q-30 38-71.5 59T480-240q-47 0-88.5-21T320-320H200v120Zm280-120q38 0 69-22t43-58h168v-360H200v360h168q12 36 43 58t69 22ZM200-200h560-560Z',
     snooze: 'M480-80q-75 0-140.5-28.5t-114-77q-48.5-48.5-77-114T120-440q0-75 28.5-140.5t77-114q48.5-48.5 114-77T480-880q75 0 140.5 28.5t114 77q48.5 48.5 77 114T840-440q0 75-28.5 140.5t-77 114q-48.5 48.5-114 77T480-80Zm0-80q116 0 198-82t82-198q0-116-82-198t-198-82q-116 0-198 82t-82 198q0 116 82 198t198 82Zm116-148 56-56-132-132v-184h-80v216l156 156ZM224-854l56 56-170 170-56-56 170-170Zm512 0 170 170-56 56-170-170 56-56Z',
     check: 'M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z',
+    done_all: 'M268-240 42-466l57-56 170 170 56 56-57 56Zm226 0L268-466l56-57 170 170 368-368 56 57-424 424Zm0-226-57-56 198-198 57 56-198 198Z',
     push_pin: 'm640-480 80 80v80H520v240l-40 40-40-40v-240H240v-80l80-80v-280h-40v-80h400v80h-40v280Zm-286 0h252l-46-46v-314H400v314l-46 46Zm126 0Z',
     wake: 'M380-240 240-380l56-56 84 84 224-224 56 56-280 280ZM480-80q-75 0-140.5-28.5t-114-77q-48.5-48.5-77-114T120-440q0-75 28.5-140.5t77-114q48.5-48.5 114-77T480-880q75 0 140.5 28.5t114 77q48.5 48.5 77 114T840-440q0 75-28.5 140.5t-77 114q-48.5 48.5-114 77T480-80Zm0-80q116 0 198-82t82-198q0-116-82-198t-198-82q-116 0-198 82t-82 198q0 116 82 198t198 82ZM224-854l56 56-170 170-56-56 170-170Zm512 0 170 170-56 56-170-170 56-56Z',
     my_location: 'M440-42v-80q-125-14-214.5-103.5T122-440H42v-80h80q14-125 103.5-214.5T440-838v-80h80v80q125 14 214.5 103.5T838-520h80v80h-80q-14 125-103.5 214.5T520-122v80h-80Zm40-158q116 0 198-82t82-198q0-116-82-198t-198-82q-116 0-198 82t-82 198q0 116 82 198t198 82Zm0-120q-66 0-113-47t-47-113q0-66 47-113t113-47q66 0 113 47t47 113q0 66-47 113t-113 47Zm0-80q33 0 56.5-23.5T560-480q0-33-23.5-56.5T480-560q-33 0-56.5 23.5T400-480q0 33 23.5 56.5T480-400Z',
@@ -1333,6 +1789,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       revealPinned: raw.revealPinned || '当前会话位于顶部 Pinned 置顶区',
       revealNotFound: raw.revealNotFound || '当前列表未找到该会话（可能已归档）',
       revealNoChat: raw.revealNoChat || '请先打开一个会话',
+      markGroupRead: raw.markGroupRead || '本组全部标为已读',
+      toastMarkedGroupRead: raw.toastMarkedGroupRead || '已将「{group}」{n} 条会话标为已读',
+      markReadUnavailable: raw.markReadUnavailable || '原生已读接口暂不可用',
     };
   };
 
@@ -1456,6 +1915,41 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   border-radius: 9999px;
   background: #3b82f6;
   flex-shrink: 0;
+}
+.agy-group-mark-read-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground, #71717a);
+  cursor: pointer;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 3;
+  transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+.agy-group-header:hover .agy-group-mark-read-btn,
+.agy-group-header:focus-within .agy-group-mark-read-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+.agy-group-mark-read-btn:hover {
+  background: var(--secondary, rgba(10,10,12,0.08));
+  color: #2563eb;
+}
+.agy-group-header:has(.agy-group-mark-read-btn):hover .agy-header-right-meta,
+.agy-group-header:has(.agy-group-mark-read-btn):focus-within .agy-header-right-meta {
+  opacity: 0;
+  pointer-events: none;
 }
 .agy-inbox-controls {
   display: inline-flex;
@@ -1694,6 +2188,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       inboxSettled: {},
       inboxFollowUp: {},
       inboxSnoozed: {},
+      requirementOverrides: {},
     },
     detectedNativeDim: 'status',
     tree: { projects: [], conversations: [], stats: { totalProjects: 0, totalConversations: 0, runningCount: 0 } },
@@ -1702,6 +2197,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     localViewedMs: new Map(),
     inboxMetaById: new Map(),
     convById: new Map(),
+    nativeAnnotationsCtx: null,
     toastTimer: null,
     flashTimer: null,
     revealSeq: 0,
@@ -1795,7 +2291,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     document.getElementById(INBOX_TOAST_ID)?.remove();
   }
 
-  function showSidebarToast(message, undoPatch = null, durationMs = undoPatch ? 5000 : 2800) {
+  function showSidebarToast(message, undoAction = null, durationMs = undoAction ? 5000 : 2800) {
     clearUndoToast();
     const listEl = document.querySelector('[data-testid="conversation-list-sidebar"]');
     const rect = listEl?.getBoundingClientRect?.();
@@ -1814,7 +2310,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     }
 
     toast.appendChild(el('span', 'truncate', message));
-    if (undoPatch) {
+    if (undoAction) {
       const undoBtn = el('button', 'agy-inbox-undo-btn', t.undo);
       undoBtn.type = 'button';
       undoBtn.setAttribute('data-testid', 'agy-inbox-undo-button');
@@ -1822,7 +2318,11 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         ev.preventDefault();
         ev.stopPropagation();
         clearUndoToast();
-        void updatePrefs(undoPatch);
+        if (typeof undoAction === 'function') {
+          undoAction();
+        } else {
+          void updatePrefs(undoAction);
+        }
       });
       toast.appendChild(undoBtn);
     }
@@ -1833,8 +2333,35 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     }, durationMs);
   }
 
-  function showUndoToast(message, undoPatch) {
-    showSidebarToast(message, undoPatch, 5000);
+  function showUndoToast(message, undoAction) {
+    showSidebarToast(message, undoAction, 5000);
+  }
+
+  function handleMarkGroupAsRead(unreadIds, groupLabel) {
+    const t = getI18n(state.prefs.language);
+    const ctx = state.nativeAnnotationsCtx || findAnnotationsContext(patchedFiber);
+    if (ctx) state.nativeAnnotationsCtx = ctx;
+    const updateFn = typeof testEnv?.updateConversationAnnotations === 'function'
+      ? testEnv.updateConversationAnnotations
+      : ctx?.updateConversationAnnotations?.bind(ctx);
+    if (typeof updateFn !== 'function') {
+      showSidebarToast(t.markReadUnavailable);
+      return;
+    }
+    const res = markGroupConversationsAsRead(unreadIds, {
+      updateConversationAnnotations: updateFn,
+      localViewedMs: state.localViewedMs,
+      nowMs: Date.now(),
+    });
+    if (!res.ok) return;
+    requestReactRefresh();
+    const msg = t.toastMarkedGroupRead
+      .replace('{group}', String(groupLabel || ''))
+      .replace('{n}', String(res.count));
+    showUndoToast(msg, () => {
+      res.undo?.();
+      requestReactRefresh();
+    });
   }
 
   function settleConversation(id) {
@@ -1997,7 +2524,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   function syncRowInboxControls() {
-    const enabled = state.prefs.inboxEnabled !== false && !state.prefs.showArchived;
+    const enabled = shouldRenderCustomGrouping() && state.prefs.inboxEnabled !== false && !state.prefs.showArchived;
     if (!enabled) {
       for (const n of document.querySelectorAll('.agy-inbox-controls, .agy-inbox-badge')) n.remove();
       closeSnoozePopover();
@@ -2144,27 +2671,11 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   function getEffectiveDims() {
-    if (Array.isArray(state.prefs.groupByDimensions)) {
-      return state.prefs.groupByDimensions.filter(d => VALID_DIMS.includes(d));
-    }
-    if (state.detectedNativeDim && state.detectedNativeDim !== 'none' && VALID_DIMS.includes(state.detectedNativeDim)) {
-      return [state.detectedNativeDim];
-    }
-    return [];
+    return getEffectiveDimsFromState(state.prefs, state.detectedNativeDim);
   }
 
   function shouldRenderCustomGrouping() {
-    if (state.prefs.inboxEnabled !== false && !state.prefs.showArchived) {
-      return true;
-    }
-    const dims = getEffectiveDims();
-    if (dims.length === 0) {
-      return Boolean(state.detectedNativeDim && state.detectedNativeDim !== 'none');
-    }
-    if (dims.length === 1 && dims[0] !== 'requirement') {
-      return Boolean(state.detectedNativeDim && dims[0] !== state.detectedNativeDim);
-    }
-    return true;
+    return shouldUseCustomGrouping({ prefs: state.prefs, detectedNativeDim: state.detectedNativeDim });
   }
 
   function formatSummaryLabel(dims, t) {
@@ -2369,36 +2880,72 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       f = f.return;
       hops += 1;
     }
-    if (!e3c) return { summaries: null, projectsById: new Map() };
 
-    let summaries = null;
-    const projectsById = new Map();
-    let ms = e3c.memoizedState;
-    let guard = 0;
-    while (ms && guard < 120) {
-      const raw = ms.memoizedState;
-      const val = Array.isArray(raw) && raw.length === 2 && Array.isArray(raw[1]) ? raw[0] : raw;
-      if (Array.isArray(val) && val.length > 0 && val[0] && typeof val[0] === 'object') {
-        if (typeof val[0].cascadeId === 'string' && val[0].summary && typeof val[0].summary === 'object') {
-          if (!summaries || val.length >= summaries.length) summaries = val;
-        } else if (val[0].project && typeof val[0].project.id === 'string') {
-          for (const p of val) {
-            if (p?.project?.id) projectsById.set(p.project.id, p.project);
+    const scanFiberState = fiber => {
+      let summaries = null;
+      const projectsById = new Map();
+      let ms = fiber?.memoizedState;
+      let guard = 0;
+      while (ms && guard < 120) {
+        const raw = ms.memoizedState;
+        const val = Array.isArray(raw) && raw.length === 2 && Array.isArray(raw[1]) ? raw[0] : raw;
+        if (Array.isArray(val) && val.length > 0 && val[0] && typeof val[0] === 'object') {
+          if (typeof val[0].cascadeId === 'string' && val[0].summary && typeof val[0].summary === 'object') {
+            if (!summaries || val.length >= summaries.length) summaries = val;
+          } else if (val[0].project && typeof val[0].project.id === 'string') {
+            for (const p of val) {
+              if (p?.project?.id) projectsById.set(p.project.id, p.project);
+            }
           }
         }
+        ms = ms.next;
+        guard += 1;
       }
-      ms = ms.next;
-      guard += 1;
+      return { summaries, projectsById };
+    };
+
+    if (e3c) {
+      const res = scanFiberState(e3c);
+      if (res.summaries) return res;
     }
-    return { summaries, projectsById };
+
+    let cur = uMcFiber?.return;
+    let curHops = 0;
+    let bestSummaries = null;
+    const mergedProjects = new Map();
+    while (cur && curHops < 30) {
+      const { summaries, projectsById } = scanFiberState(cur);
+      if (summaries && (!bestSummaries || summaries.length >= bestSummaries.length)) {
+        bestSummaries = summaries;
+      }
+      for (const [k, v] of projectsById.entries()) {
+        if (!mergedProjects.has(k)) mergedProjects.set(k, v);
+      }
+      cur = cur.return;
+      curHops += 1;
+    }
+    return { summaries: bestSummaries, projectsById: mergedProjects };
   }
 
-  function buildLiveConversations(uMcFiber, rawItems, excludedIds, archivedOnly) {
+  function buildLiveConversations(uMcFiber, postMainItems, excludedIds, archivedOnly, nativeSettings = {}) {
     const activeChatId = markActiveChatViewed();
     const collectorMap = new Map();
     for (const c of state.tree.conversations || []) {
       collectorMap.set(c.id, c);
     }
+
+    const activeFilters = nativeSettings?.activeFilters || [];
+    const visibleRowIds = new Set();
+    let postMainHasCollapseOrShowMore = false;
+    for (const it of postMainItems || []) {
+      if (it?.type === 'row' && (it.cascadeId || it.id)) {
+        visibleRowIds.add(it.cascadeId || it.id);
+      } else if (it?.type === 'show-more' || (it?.type === 'header' && it.isCollapsed)) {
+        postMainHasCollapseOrShowMore = true;
+      }
+    }
+    const useExactVisibleFilter = activeFilters.length > 0 && !postMainHasCollapseOrShowMore;
+    const nowMs = Date.now();
 
     const { summaries, projectsById } = readLiveE3cState(uMcFiber);
     if (!summaries || !summaries.length) {
@@ -2406,6 +2953,10 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       for (const c of collectorMap.values()) {
         if (excludedIds.has(c.id)) continue;
         if (archivedOnly ? !c.isArchived : c.isArchived) continue;
+        if (useExactVisibleFilter && !visibleRowIds.has(c.id)) continue;
+        if (!useExactVisibleFilter && activeFilters.length > 0 && !matchesNativeFilter(c, null, activeFilters, visibleRowIds, nowMs)) {
+          continue;
+        }
         fallbackList.push({
           ...c,
           statusGroup: getStatusGroup(c),
@@ -2432,7 +2983,6 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       const isArchived = Boolean(sum.annotations?.archived) || Boolean(base?.isArchived);
       if (archivedOnly ? !isArchived : isArchived) continue;
 
-      // Also skip non-primary trajectory types when collector is loaded unless very fresh (< 45s)
       const updatedAtMs = protoTsMs(sum.lastModifiedTime) || base?.updatedAtMs || 0;
       const userInputAtMs = protoTsMs(sum.lastUserInputTime) || base?.userInputAtMs || 0;
       if (collectorMap.size > 0 && !base) {
@@ -2464,8 +3014,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       const repoName = base?.repoName || basenameUri(wsUri) || projectName || '';
       const envKind = base?.envKind || (/(?:vscode-remote|ssh|https?):\/\//i.test(wsUri) ? 'cloud' : 'local');
       const title = String(sum.annotations?.title || sum.summary || base?.title || 'Untitled').replace(/\s+/g, ' ').trim();
+      const groupId = String(sum.annotations?.groupId || sum.groupId || base?.groupId || '').trim();
 
-      merged.push({
+      const convObj = {
         id,
         title,
         status: statusGroup === 'idle' ? 'idle' : 'running',
@@ -2480,12 +3031,20 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         isUnassigned,
         repoName,
         envKind,
-      });
+        groupId,
+        ...(base?.reqSource === 'group_id' ? { reqSource: base.reqSource, reqKey: base.reqKey, reqLabel: base.reqLabel, reqKind: base.reqKind } : {}),
+      };
+
+      if (useExactVisibleFilter && !visibleRowIds.has(id)) continue;
+      if (!useExactVisibleFilter && activeFilters.length > 0 && !matchesNativeFilter(convObj, entry, activeFilters, visibleRowIds, nowMs)) {
+        continue;
+      }
+
+      merged.push(convObj);
     }
 
-    // Preserve any un-synced items from rawProps if summaries omitted them temporarily
     if (collectorMap.size > 0) {
-      for (const rawItem of rawItems || []) {
+      for (const rawItem of postMainItems || []) {
         if (rawItem.type !== 'row' || !rawItem.cascadeId || seen.has(rawItem.cascadeId) || excludedIds.has(rawItem.cascadeId)) continue;
         const base = collectorMap.get(rawItem.cascadeId);
         if (base) {
@@ -2549,9 +3108,35 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     );
   }
 
+  function makeMarkGroupReadAction(item, bgCls) {
+    const unreadIds = Array.isArray(item?._agyUnreadIds) ? item._agyUnreadIds : [];
+    if (!unreadIds.length) return null;
+    const t = getI18n(state.prefs.language);
+    return h(
+      'button',
+      {
+        type: 'button',
+        'data-testid': 'agy-group-mark-read',
+        'data-agy-group-id': item.id,
+        title: t.markGroupRead,
+        'aria-label': t.markGroupRead,
+        onPointerDown: ev => ev.stopPropagation(),
+        onMouseDown: ev => ev.stopPropagation(),
+        onClick: ev => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          handleMarkGroupAsRead(unreadIds, item.label);
+        },
+        className: `agy-group-mark-read-btn ${bgCls}`,
+      },
+      svgReactIcon(ICON_PATHS.done_all, 14),
+    );
+  }
+
   function renderCustomHeaderElement(item, surface) {
     const isBg = surface === 'background';
     const bgCls = isBg ? 'bg-background' : 'bg-sidebar';
+    const markReadBtn = makeMarkGroupReadAction(item, bgCls);
 
     if (item._agyKind === 'req-header') {
       const padLeft = 4 + Math.min(item._agyDepth ?? 1, 4) * 14;
@@ -2562,7 +3147,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
           : String(item._agyTotal);
         rightEl = h(
           'span',
-          { className: 'ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
+          { className: 'agy-header-right-meta ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
           h(
             'span',
             { className: 'agy-native-spinner', title: 'Working' },
@@ -2576,7 +3161,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       } else if (item._agyUnread > 0) {
         rightEl = h(
           'span',
-          { className: 'ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
+          { className: 'agy-header-right-meta ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
           h('span', { className: 'agy-native-unread', title: 'Unread' }),
           h('span', null, String(item._agyTotal)),
         );
@@ -2585,14 +3170,14 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         const label = ageText ? `${ageText} · ${item._agyTotal}` : String(item._agyTotal);
         rightEl = h(
           'span',
-          { className: 'ml-2 shrink-0 text-xs text-muted-foreground opacity-65 tabular-nums' },
+          { className: 'agy-header-right-meta ml-2 shrink-0 text-xs text-muted-foreground opacity-65 tabular-nums' },
           label,
         );
       }
 
       return h(
         'div',
-        { className: 'relative w-full group/header' },
+        { className: 'relative w-full group/header agy-group-header' },
         h(
           'button',
           {
@@ -2615,6 +3200,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
           ),
           rightEl,
         ),
+        markReadBtn,
       );
     }
 
@@ -2623,7 +3209,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     const topRightEl = (item._agyRunning || 0) > 0
       ? h(
           'span',
-          { className: 'ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
+          { className: 'agy-header-right-meta ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
           h(
             'span',
             { className: 'agy-native-spinner', title: 'Working' },
@@ -2637,14 +3223,14 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       : ((item._agyUnread || 0) > 0
           ? h(
               'span',
-              { className: 'ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
+              { className: 'agy-header-right-meta ml-2 shrink-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground tabular-nums' },
               h('span', { className: 'agy-native-unread', title: 'Unread' }),
               h('span', null, String(item.count ?? '')),
             )
-          : h('span', { className: 'ml-2 shrink-0 text-xs opacity-60 tabular-nums' }, String(item.count ?? '')));
+          : h('span', { className: 'agy-header-right-meta ml-2 shrink-0 text-xs opacity-60 tabular-nums' }, String(item.count ?? '')));
     return h(
       'div',
-      { className: 'relative w-full group/header' },
+      { className: 'relative w-full group/header agy-group-header' },
       h(
         'button',
         {
@@ -2674,6 +3260,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         ),
         topRightEl,
       ),
+      markReadBtn,
     );
   }
 
@@ -2685,6 +3272,9 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       state.triggerRefresh = rawProps.onFocusGroupId;
     }
     state.lastRawProps = rawProps;
+    if (rawProps?.subtitleContext?.groupBy && (VALID_DIMS.includes(rawProps.subtitleContext.groupBy) || rawProps.subtitleContext.groupBy === 'none')) {
+      state.detectedNativeDim = rawProps.subtitleContext.groupBy;
+    }
     if (!origUMcFn) return null;
 
     if (!shouldRenderCustomGrouping() || !Array.isArray(rawProps?.items)) {
@@ -2696,12 +3286,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
     try {
       detectReactElementType(rawProps.items, rawProps.customHeaderRenderer);
-
-      const mainIdx = rawProps.items.findIndex(
-        it => it?.type === 'section-header' && (it.id === 'main-section-header' || it.collapseId === 'main-section-header'),
-      );
-      const prefixItems = mainIdx >= 0 ? rawProps.items.slice(0, mainIdx + 1) : [];
-      const mainHdr = mainIdx >= 0 ? rawProps.items[mainIdx] : null;
+      const isHistory = rawProps.surface === 'background' || rawProps.variant === 'history';
+      const { prefixItems, mainHdr, postMainItems } = splitPrefixAndMainItems(rawProps.items, isHistory);
       state.lastPrefixItems = prefixItems;
       state.lastMainHdr = mainHdr;
 
@@ -2712,18 +3298,25 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
 
       const excludedIds = new Set();
       for (const it of prefixItems) {
-        if (it?.type === 'row' && it.cascadeId) excludedIds.add(it.cascadeId);
+        if (it?.type === 'row' && (it.cascadeId || it.id)) excludedIds.add(it.cascadeId || it.id);
       }
 
-      const archivedOnly = /\(Archived\)/i.test(mainHdr?.title || '') || Boolean(state.prefs.showArchived);
-      const liveConvs = buildLiveConversations(patchedFiber, rawProps.items, excludedIds, archivedOnly);
+      const nativeRowById = new Map();
+      for (const it of postMainItems) {
+        if (it?.type === 'row' && (it.cascadeId || it.id)) {
+          nativeRowById.set(it.cascadeId || it.id, it);
+        }
+      }
+
+      const nativeSettings = extractNativeSidebarSettings(rawProps, mainHdr);
+      const archivedOnly = nativeSettings.archivedOnly || /\(Archived\)/i.test(mainHdr?.title || '') || Boolean(state.prefs.showArchived);
+      const liveConvs = buildLiveConversations(patchedFiber, postMainItems, excludedIds, archivedOnly, nativeSettings);
       state.lastLiveConvs = liveConvs;
       state.convById = new Map(liveConvs.map(c => [c.id, c]));
 
       const t = getI18n(state.prefs.language);
       const dims = getEffectiveDims();
       const collapsedSet = new Set(state.prefs.collapsedGroupKeys || []);
-      const isHistory = rawProps.variant === 'history';
       const outMetaById = new Map();
       const useInbox = !archivedOnly && !isHistory && state.prefs.inboxEnabled !== false;
       const virtualItems = buildVirtualItemsForDims(liveConvs, dims, {
@@ -2732,6 +3325,8 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         expandedLimits: state.expandedLimits,
         activeChatId: currentChatId(),
         isHistory,
+        sortBy: nativeSettings.sortBy,
+        requirementOverrides: state.prefs.requirementOverrides,
         inbox: useInbox ? getInboxPrefsFromState(state.prefs) : undefined,
         nowMs: Date.now(),
         outMetaById,
@@ -2742,6 +3337,12 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       }
 
       const styledItems = virtualItems.map(it => {
+        if (it.type === 'row' && it.cascadeId && nativeRowById.has(it.cascadeId)) {
+          return {
+            ...nativeRowById.get(it.cascadeId),
+            ...it,
+          };
+        }
         if (it.type === 'show-more' && it._agyIndentPx) {
           return {
             ...it,
@@ -2751,10 +3352,11 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
         return it;
       });
 
+      const effectiveSurface = rawProps.surface || (isHistory ? 'background' : 'sidebar');
       const origHdrRenderer = rawProps.customHeaderRenderer;
       const wrappedHeaderRenderer = item => {
         if (item && item._agyKind) {
-          return renderCustomHeaderElement(item, rawProps.surface);
+          return renderCustomHeaderElement(item, effectiveSurface);
         }
         return origHdrRenderer ? origHdrRenderer(item) : undefined;
       };
@@ -2800,13 +3402,21 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     let f = listEl[fk];
     let uMc = null;
     while (f) {
-      if (typeof f.type === 'function' && f.memoizedProps && Array.isArray(f.memoizedProps.items) && f.memoizedProps.variant === 'sidebar') {
+      if (
+        typeof f.type === 'function'
+        && f.memoizedProps
+        && Array.isArray(f.memoizedProps.items)
+        && (f.memoizedProps.surface === 'sidebar' || f.memoizedProps.variant === 'sidebar')
+      ) {
         uMc = f;
         break;
       }
       f = f.return;
     }
     if (!uMc) return false;
+
+    const annCtx = findAnnotationsContext(uMc);
+    if (annCtx) state.nativeAnnotationsCtx = annCtx;
 
     if (typeof uMc.memoizedProps?.onFocusGroupId === 'function') {
       state.triggerRefresh = uMc.memoizedProps.onFocusGroupId;
@@ -2827,8 +3437,10 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   }
 
   // Window capture-phase multi-select interceptor: keeps Base-UI Group By submenu open when toggling dimensions
+  let bypassingMenuIntercept = false;
   const INTERCEPT_EVENTS = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
   const onWindowMenuEvent = e => {
+    if (bypassingMenuIntercept) return;
     const targetEl = e.target;
     if (e.type === 'pointerdown' && state.popoverState) {
       const pop = document.getElementById(SNOOZE_POPOVER_ID);
@@ -2892,6 +3504,25 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
       ? current.filter(d => d !== optDim)
       : [...current, optDim];
 
+    if (next.length === 1 && next[0] !== 'requirement') {
+      if (next[0] === state.detectedNativeDim) {
+        void updatePrefs({ groupByDimensions: null });
+        return;
+      }
+      const nativeRadio = groupBox.querySelector(`[data-testid="group-by-option-${next[0]}"]`)?.closest?.('[role="menuitemradio"]');
+      if (nativeRadio) {
+        bypassingMenuIntercept = true;
+        try {
+          nativeRadio.click();
+        } finally {
+          bypassingMenuIntercept = false;
+        }
+        state.detectedNativeDim = next[0];
+        void updatePrefs({ groupByDimensions: null });
+        return;
+      }
+    }
+
     void updatePrefs({ groupByDimensions: next });
   };
 
@@ -2944,19 +3575,6 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     return listEl;
   }
 
-  function estimateItemTopPx(items, targetIdx) {
-    let top = 0;
-    const end = Math.min(targetIdx, items.length);
-    for (let i = 0; i < end; i += 1) {
-      const type = items[i]?.type;
-      if (type === 'section-header') top += 28;
-      else if (type === 'header') top += 37;
-      else if (type === 'show-more') top += 34;
-      else top += 49;
-    }
-    return top;
-  }
-
   function waitNextFrame() {
     return new Promise(resolve => requestAnimationFrame(resolve));
   }
@@ -2987,7 +3605,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     const scroller = findSidebarScroller(listEl);
     if (!scroller) return false;
 
-    const estY = estimateItemTopPx(itemsList || [], targetIdx);
+    const estY = estimateItemTopPx(itemsList || [], targetIdx, state.lastRawProps);
     const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
     scroller.scrollTop = Math.min(maxTop, Math.max(0, estY - scroller.clientHeight * 0.42));
 
@@ -3227,6 +3845,7 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     }
     state.inboxMetaById.clear();
     state.convById.clear();
+    state.nativeAnnotationsCtx = null;
     requestReactRefresh();
     delete window.__agyProjectSidebarInstalled;
   };

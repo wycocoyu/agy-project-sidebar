@@ -124,17 +124,47 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
   process.once(sig, () => void shutdown());
 }
 
+async function applyRequirementOverridePayload(payload) {
+  const body = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  let updates = {};
+  let remove = Array.isArray(body.remove) ? body.remove : [];
+  if (typeof body.conversationId === 'string' && body.conversationId.trim()) {
+    const id = body.conversationId.trim();
+    if (body.remove === true || body.key === null) {
+      remove = [...remove, id];
+    } else {
+      updates = { [id]: { key: body.key, label: body.label } };
+    }
+  } else if (body.overrides && typeof body.overrides === 'object' && !Array.isArray(body.overrides)) {
+    updates = body.overrides;
+  } else if (body.set && typeof body.set === 'object' && !Array.isArray(body.set)) {
+    updates = body.set;
+  }
+  const updated = await preferences.patchRequirementOverrides(updates, { remove });
+  collector.invalidateCache();
+  return { requirementOverrides: updated.requirementOverrides };
+}
+
 if (isHostSidecar) {
   const { SidecarApp, Response } = await loadSidecarSdk();
   const app = new SidecarApp();
   app.api('/', () => new Response(auxPanelHtml(), { contentType: 'text/html; charset=utf-8', headers: { 'Cache-Control': 'no-store' } }), 'GET');
   app.api('/api/tree', async () => {
     const prefs = await preferences.get();
-    return collector.snapshot({ showArchived: prefs.showArchived });
+    return collector.snapshot({ showArchived: prefs.showArchived, requirementOverrides: prefs.requirementOverrides });
   }, 'GET');
   app.api('/api/integration', () => integration.health, 'GET');
   app.api('/api/preferences', () => preferences.get(), 'GET');
-  app.api('/api/preferences', async data => preferences.set(data || {}), 'POST');
+  app.api('/api/preferences', async data => {
+    const updated = await preferences.set(data || {});
+    collector.invalidateCache();
+    return updated;
+  }, 'POST');
+  app.api('/api/requirement-overrides', async () => {
+    const prefs = await preferences.get();
+    return { requirementOverrides: prefs.requirementOverrides };
+  }, 'GET');
+  app.api('/api/requirement-overrides', data => applyRequirementOverridePayload(data), 'POST');
   app.run();
   integration.start();
 } else if (process.argv.includes('--bootstrap')) {
@@ -153,7 +183,11 @@ if (isHostSidecar) {
     }
     if (url.pathname === '/api/tree') {
       const prefs = await preferences.get();
-      const data = await collector.snapshot({ force: url.searchParams.get('force') === '1', showArchived: prefs.showArchived });
+      const data = await collector.snapshot({
+        force: url.searchParams.get('force') === '1',
+        showArchived: prefs.showArchived,
+        requirementOverrides: prefs.requirementOverrides,
+      });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(data));
       return;
@@ -169,7 +203,27 @@ if (isHostSidecar) {
       if (req.method === 'POST') {
         let body = '';
         for await (const c of req) body += c;
-        res.end(JSON.stringify(await preferences.set(JSON.parse(body || '{}'))));
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); } catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
+        const updated = await preferences.set(parsed);
+        collector.invalidateCache();
+        res.end(JSON.stringify(updated));
+        return;
+      }
+    }
+    if (url.pathname === '/api/requirement-overrides') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      if (req.method === 'GET') {
+        const prefs = await preferences.get();
+        res.end(JSON.stringify({ requirementOverrides: prefs.requirementOverrides }));
+        return;
+      }
+      if (req.method === 'POST') {
+        let body = '';
+        for await (const c of req) body += c;
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); } catch { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
+        res.end(JSON.stringify(await applyRequirementOverridePayload(parsed)));
         return;
       }
     }

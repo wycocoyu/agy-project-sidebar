@@ -6,6 +6,7 @@ import { basename } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 import { platformPaths } from '../../compat/platform.mjs';
+import { PreferencesStore } from '../../compat/preferences.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -216,6 +217,214 @@ export function extractRequirementDescriptor(title) {
   return { kind: 'inbox', key: 'INBOX', shortId: '', label: '', scopeByProject: false };
 }
 
+export function resolveRequirementOverrideDescriptor(overrideEntry, projectKey = '__unassigned__') {
+  if (!overrideEntry || typeof overrideEntry !== 'object' || Array.isArray(overrideEntry)) return null;
+  const rawKey = typeof overrideEntry.key === 'string' ? overrideEntry.key.replace(/\s+/g, ' ').trim() : '';
+  if (!rawKey) return null;
+  if (rawKey.toUpperCase() === 'INBOX') {
+    return { kind: 'inbox', key: 'INBOX', effectiveKey: 'INBOX', label: '', scopeByProject: false };
+  }
+  const rawLabel = typeof overrideEntry.label === 'string' ? overrideEntry.label.replace(/\s+/g, ' ').trim() : '';
+  if (rawKey.includes('::')) {
+    const kind = rawKey.includes('::THEME:') ? 'theme' : 'issue';
+    const fallback = rawKey.split('::').slice(1).join('::');
+    return { kind, key: rawKey, effectiveKey: rawKey, label: cleanRequirementLabel(rawLabel, fallback), scopeByProject: false };
+  }
+  let m = rawKey.match(/^ISSUE:(.+)$/i);
+  if (m) {
+    const inner = m[1].trim();
+    if (/^[1-9]\d*$/.test(inner)) {
+      const key = `ISSUE:${inner}`;
+      return {
+        kind: 'issue',
+        key,
+        effectiveKey: `${projectKey}::${key}`,
+        label: cleanRequirementLabel(rawLabel, `Issue ${inner}`),
+        scopeByProject: true,
+      };
+    }
+    const upper = inner.toUpperCase();
+    const key = `ISSUE:${upper}`;
+    return {
+      kind: 'issue',
+      key,
+      effectiveKey: key,
+      label: cleanRequirementLabel(rawLabel, upper),
+      scopeByProject: false,
+    };
+  }
+  m = rawKey.match(/^PR:([1-9]\d*)$/i);
+  if (m) {
+    const key = `PR:${m[1]}`;
+    return {
+      kind: 'issue',
+      key,
+      effectiveKey: `${projectKey}::${key}`,
+      label: cleanRequirementLabel(rawLabel, `PR ${m[1]}`),
+      scopeByProject: true,
+    };
+  }
+  if (/^(#[1-9]\d*|Issue\s*#?\s*[1-9]\d*|PR\s*#?\s*[1-9]\d*|[Qq]\d+|[A-Za-z][A-Za-z0-9]{1,9}-\d+)$/i.test(rawKey)) {
+    const info = normalizeIssueToken(rawKey);
+    if (!TECH_ID_RE.test(info.shortId)) {
+      return {
+        kind: 'issue',
+        key: info.key,
+        effectiveKey: info.scopeByProject ? `${projectKey}::${info.key}` : info.key,
+        label: cleanRequirementLabel(rawLabel, info.fallbackLabel),
+        scopeByProject: info.scopeByProject,
+      };
+    }
+  }
+  m = rawKey.match(/^THEME:(.+)$/i);
+  if (m) {
+    const themeName = m[1].trim();
+    const key = `THEME:${themeName.toLowerCase()}`;
+    return {
+      kind: 'theme',
+      key,
+      effectiveKey: `${projectKey}::${key}`,
+      label: cleanRequirementLabel(rawLabel, themeName),
+      scopeByProject: true,
+    };
+  }
+  const bracketMatch = rawKey.match(BRACKET_THEME_RE);
+  if (bracketMatch) {
+    const tag = (bracketMatch[1] || bracketMatch[2] || '').trim();
+    if (tag) {
+      const key = `THEME:${tag.toLowerCase()}`;
+      return {
+        kind: 'theme',
+        key,
+        effectiveKey: `${projectKey}::${key}`,
+        label: cleanRequirementLabel(rawLabel, tag),
+        scopeByProject: true,
+      };
+    }
+  }
+  if (/^convgroup:/i.test(rawKey)) {
+    const slug = rawKey.slice('convgroup:'.length).trim();
+    const key = `convgroup:${slug}`;
+    return {
+      kind: 'convgroup',
+      key,
+      effectiveKey: key,
+      label: cleanRequirementLabel(rawLabel, slug || rawKey),
+      scopeByProject: false,
+    };
+  }
+  const key = rawKey.includes(':') ? rawKey : `OVERRIDE:${rawKey}`;
+  return {
+    kind: 'override',
+    key,
+    effectiveKey: key,
+    label: cleanRequirementLabel(rawLabel, rawKey),
+    scopeByProject: false,
+  };
+}
+
+export function resolveGroupIdDescriptor(groupId, groupLabel = '') {
+  const raw = String(groupId || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return null;
+  const hasPrefix = /^convgroup:/i.test(raw);
+  const slug = hasPrefix ? raw.slice('convgroup:'.length).trim() : raw;
+  if (!slug) return null;
+  const key = `convgroup:${slug}`;
+  return {
+    kind: 'convgroup',
+    key,
+    effectiveKey: key,
+    label: cleanRequirementLabel(groupLabel || slug, key),
+    scopeByProject: false,
+  };
+}
+
+export function assignRequirements(convs = [], { requirementOverrides = {} } = {}) {
+  const overrides = requirementOverrides && typeof requirementOverrides === 'object' ? requirementOverrides : {};
+  const themeCounts = new Map();
+
+  const prepared = convs.map(conv => {
+    const id = String(conv.id || conv.conversation_id || '').trim();
+    const projectKey = conv.projectKey || '__unassigned__';
+    const tier1 = id ? resolveRequirementOverrideDescriptor(overrides[id], projectKey) : null;
+    const tier2 = tier1 ? null : extractRequirementDescriptor(conv.title);
+    if (tier2?.kind === 'theme-candidate') {
+      const scopeKey = `${projectKey}::${tier2.key}`;
+      themeCounts.set(scopeKey, (themeCounts.get(scopeKey) || 0) + 1);
+    }
+    return { conv, projectKey, tier1, tier2 };
+  });
+
+  const groupCounts = new Map();
+  const overrideLabels = new Map();
+  const groupLabels = new Map();
+
+  const resolved = prepared.map(({ conv, projectKey, tier1, tier2 }) => {
+    let effectiveKey = 'INBOX';
+    let kind = 'inbox';
+    let label = '';
+    let reqSource = 'inbox';
+
+    if (tier1) {
+      reqSource = 'override';
+      if (tier1.kind !== 'inbox') {
+        effectiveKey = tier1.effectiveKey;
+        kind = tier1.kind;
+        label = tier1.label;
+      }
+    } else if (tier2?.kind === 'issue') {
+      reqSource = 'title';
+      effectiveKey = tier2.scopeByProject ? `${projectKey}::${tier2.key}` : tier2.key;
+      kind = 'issue';
+      label = tier2.label;
+    } else if (tier2?.kind === 'theme-candidate') {
+      const scopeKey = `${projectKey}::${tier2.key}`;
+      if ((themeCounts.get(scopeKey) || 0) >= 2) {
+        reqSource = 'title';
+        effectiveKey = scopeKey;
+        kind = 'theme';
+        label = tier2.label;
+      }
+    }
+
+    if (effectiveKey === 'INBOX' && reqSource === 'inbox') {
+      const tier3 = resolveGroupIdDescriptor(conv.groupId ?? conv.group_id, conv.groupLabel ?? conv.group_label ?? '');
+      if (tier3) {
+        reqSource = 'group_id';
+        effectiveKey = tier3.effectiveKey;
+        kind = 'convgroup';
+        label = tier3.label;
+      }
+    }
+
+    if (effectiveKey !== 'INBOX') {
+      groupCounts.set(effectiveKey, (groupCounts.get(effectiveKey) || 0) + 1);
+      if (reqSource === 'override') {
+        const prev = overrideLabels.get(effectiveKey);
+        if (!prev || label.length > prev.length) overrideLabels.set(effectiveKey, label);
+      }
+      const prevAny = groupLabels.get(effectiveKey);
+      if (!prevAny || label.length > prevAny.length) groupLabels.set(effectiveKey, label);
+    }
+
+    return { conv, effectiveKey, kind, label, reqSource };
+  });
+
+  return resolved.map(({ conv, effectiveKey, kind, label, reqSource }) => {
+    if (effectiveKey === 'INBOX') {
+      return { ...conv, reqKey: 'INBOX', reqLabel: '', reqKind: 'inbox', reqCount: 1, reqSource };
+    }
+    return {
+      ...conv,
+      reqKey: effectiveKey,
+      reqLabel: overrideLabels.get(effectiveKey) || groupLabels.get(effectiveKey) || label,
+      reqKind: kind,
+      reqCount: groupCounts.get(effectiveKey) || 1,
+      reqSource,
+    };
+  });
+}
+
 export function parseTimestampMs(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value > 1e12 ? value : value * 1000;
   if (!value || typeof value !== 'string') return 0;
@@ -224,7 +433,14 @@ export function parseTimestampMs(value) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new Set(), rows = [], archivedIds = new Set(), showArchived = false } = {}) {
+export function buildSidebarSnapshot({
+  rawProjects = [],
+  sidecarProjectIds = new Set(),
+  rows = [],
+  archivedIds = new Set(),
+  showArchived = false,
+  requirementOverrides = {},
+} = {}) {
   const realProjects = filterRealProjects(rawProjects, sidecarProjectIds);
   const projectsById = new Map(realProjects.map(p => [p.id, p]));
 
@@ -236,7 +452,6 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     if (isArchived && !showArchived) continue;
 
     const projMatch = resolveProjectForConversation(row, projectsById, realProjects);
-    const reqDesc = extractRequirementDescriptor(row.title);
     const updatedAtMs = parseTimestampMs(row.last_modified_time);
     const userInputAtMs = parseTimestampMs(row.last_user_input_time);
     const isRunning = row.status === 'CASCADE_RUN_STATUS_RUNNING' || row.status === 'CASCADE_RUN_STATUS_BUSY';
@@ -251,6 +466,7 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
       : (projMatch.projectName || projMatch.workspaceHint || '');
     const rawUrisText = typeof row.workspace_uris === 'string' ? row.workspace_uris : JSON.stringify(row.workspace_uris || '');
     const envKind = /(?:vscode-remote|ssh|https?):\/\//i.test(rawUrisText) ? 'cloud' : 'local';
+    const groupId = String(row.group_id || row.groupId || '').trim();
 
     items.push({
       id,
@@ -268,29 +484,8 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
       workspaceHint: projMatch.workspaceHint || '',
       repoName,
       envKind,
-      reqCandidate: reqDesc,
+      groupId,
     });
-  }
-
-  // Count how many conversations in each scope share a theme-candidate or explicit issue key
-  const themeCounts = new Map();
-  const issueCounts = new Map();
-  const issueLabels = new Map();
-  for (const item of items) {
-    if (item.reqCandidate.kind === 'theme-candidate') {
-      const scopeKey = `${item.projectKey}::${item.reqCandidate.key}`;
-      themeCounts.set(scopeKey, (themeCounts.get(scopeKey) || 0) + 1);
-    } else if (item.reqCandidate.kind === 'issue') {
-      const effectiveKey = item.reqCandidate.scopeByProject
-        ? `${item.projectKey}::${item.reqCandidate.key}`
-        : item.reqCandidate.key;
-      item.effectiveIssueKey = effectiveKey;
-      issueCounts.set(effectiveKey, (issueCounts.get(effectiveKey) || 0) + 1);
-      const existing = issueLabels.get(effectiveKey);
-      if (!existing || item.reqCandidate.label.length > existing.length) {
-        issueLabels.set(effectiveKey, item.reqCandidate.label);
-      }
-    }
   }
 
   const projectSummary = new Map();
@@ -306,27 +501,7 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     });
   }
 
-  const conversations = items.map(item => {
-    let reqKey = 'INBOX';
-    let reqLabel = '';
-    let reqKind = 'inbox';
-    let reqCount = 1;
-    if (item.reqCandidate.kind === 'issue') {
-      reqKey = item.effectiveIssueKey;
-      reqLabel = issueLabels.get(reqKey) || item.reqCandidate.label;
-      reqKind = 'issue';
-      reqCount = issueCounts.get(reqKey) || 1;
-    } else if (item.reqCandidate.kind === 'theme-candidate') {
-      const scopeKey = `${item.projectKey}::${item.reqCandidate.key}`;
-      const count = themeCounts.get(scopeKey) || 0;
-      if (count >= 2) {
-        reqKey = scopeKey;
-        reqLabel = item.reqCandidate.label;
-        reqKind = 'theme';
-        reqCount = count;
-      }
-    }
-
+  for (const item of items) {
     if (!projectSummary.has(item.projectKey)) {
       projectSummary.set(item.projectKey, {
         id: item.projectKey,
@@ -342,10 +517,9 @@ export function buildSidebarSnapshot({ rawProjects = [], sidecarProjectIds = new
     pSum.total += 1;
     if (item.status === 'running') pSum.running += 1;
     if (item.updatedAtMs > pSum.latestMs) pSum.latestMs = item.updatedAtMs;
+  }
 
-    const { reqCandidate, effectiveIssueKey, ...rest } = item;
-    return { ...rest, reqKey, reqLabel, reqKind, reqCount };
-  });
+  const conversations = assignRequirements(items, { requirementOverrides });
 
   conversations.sort((a, b) => {
     if (a.status !== b.status) return a.status === 'running' ? -1 : 1;
@@ -455,7 +629,11 @@ export class SidebarCollector {
     this.paths = paths;
     this.lsEndpoint = null;
     this.projectsCache = { fetchedAt: 0, rawProjects: [], sidecarProjectIds: new Set() };
-    this.snapshotCache = { fetchedAt: 0, showArchived: false, data: null };
+    this.snapshotCache = { fetchedAt: 0, showArchived: false, overridesKey: '', data: null };
+  }
+
+  invalidateCache() {
+    this.snapshotCache = { fetchedAt: 0, showArchived: false, overridesKey: '', data: null };
   }
 
   async ensureEndpoint() {
@@ -511,8 +689,9 @@ export class SidebarCollector {
         db.prepare('PRAGMA table_info(conversation_summaries)').all().map(c => c.name),
       );
       const userInputCol = cols.has('last_user_input_time') ? ', last_user_input_time' : '';
+      const groupIdCol = cols.has('group_id') ? ', group_id' : '';
       const rows = db.prepare(`
-        SELECT conversation_id, title, status, project_id, workspace_uris, not_fully_idle, last_modified_time${userInputCol}
+        SELECT conversation_id, title, status, project_id, workspace_uris, not_fully_idle, last_modified_time${userInputCol}${groupIdCol}
         FROM conversation_summaries
         WHERE nesting_depth = 0 AND killed = 0
         ORDER BY last_modified_time DESC
@@ -529,9 +708,25 @@ export class SidebarCollector {
     }
   }
 
-  async snapshot({ force = false, showArchived = false } = {}) {
+  async readRequirementOverrides() {
+    if (typeof this.paths?.preferences !== 'string' || !this.paths.preferences) return {};
+    const prefs = await new PreferencesStore(this.paths.preferences).get();
+    return prefs.requirementOverrides || {};
+  }
+
+  async snapshot({ force = false, showArchived = false, requirementOverrides } = {}) {
+    const resolvedOverrides = requirementOverrides && typeof requirementOverrides === 'object'
+      ? requirementOverrides
+      : await this.readRequirementOverrides();
+    const overridesKey = JSON.stringify(resolvedOverrides);
     const now = Date.now();
-    if (!force && this.snapshotCache.data && this.snapshotCache.showArchived === showArchived && now - this.snapshotCache.fetchedAt < 1500) {
+    if (
+      !force
+      && this.snapshotCache.data
+      && this.snapshotCache.showArchived === showArchived
+      && this.snapshotCache.overridesKey === overridesKey
+      && now - this.snapshotCache.fetchedAt < 1500
+    ) {
       return this.snapshotCache.data;
     }
 
@@ -540,8 +735,15 @@ export class SidebarCollector {
       Promise.resolve().then(() => this.readConversationsFromDb()),
     ]);
 
-    const data = buildSidebarSnapshot({ rawProjects, sidecarProjectIds, rows, archivedIds, showArchived });
-    this.snapshotCache = { fetchedAt: Date.now(), showArchived, data };
+    const data = buildSidebarSnapshot({
+      rawProjects,
+      sidecarProjectIds,
+      rows,
+      archivedIds,
+      showArchived,
+      requirementOverrides: resolvedOverrides,
+    });
+    this.snapshotCache = { fetchedAt: Date.now(), showArchived, overridesKey, data };
     return data;
   }
 }
