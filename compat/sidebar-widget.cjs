@@ -1732,7 +1732,6 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     done_all: 'M268-240 42-466l57-56 170 170 56 56-57 56Zm226 0L268-466l56-57 170 170 368-368 56 57-424 424Zm0-226-57-56 198-198 57 56-198 198Z',
     push_pin: 'm640-480 80 80v80H520v240l-40 40-40-40v-240H240v-80l80-80v-280h-40v-80h400v80h-40v280Zm-286 0h252l-46-46v-314H400v314l-46 46Zm126 0Z',
     wake: 'M380-240 240-380l56-56 84 84 224-224 56 56-280 280ZM480-80q-75 0-140.5-28.5t-114-77q-48.5-48.5-77-114T120-440q0-75 28.5-140.5t77-114q48.5-48.5 114-77T480-880q75 0 140.5 28.5t114 77q48.5 48.5 77 114T840-440q0 75-28.5 140.5t-77 114q-48.5 48.5-114 77T480-80Zm0-80q116 0 198-82t82-198q0-116-82-198t-198-82q-116 0-198 82t-82 198q0 116 82 198t198 82ZM224-854l56 56-170 170-56-56 170-170Zm512 0 170 170-56 56-170-170 56-56Z',
-    my_location: 'M440-42v-80q-125-14-214.5-103.5T122-440H42v-80h80q14-125 103.5-214.5T440-838v-80h80v80q125 14 214.5 103.5T838-520h80v80h-80q-14 125-103.5 214.5T520-122v80h-80Zm40-158q116 0 198-82t82-198q0-116-82-198t-198-82q-116 0-198 82t-82 198q0 116 82 198t198 82Zm0-120q-66 0-113-47t-47-113q0-66 47-113t113-47q66 0 113 47t47 113q0 66-47 113t-113 47Zm0-80q33 0 56.5-23.5T560-480q0-33-23.5-56.5T480-560q-33 0-56.5 23.5T400-480q0 33 23.5 56.5T480-400Z',
   };
 
   const MENU_INBOX_TOGGLE_ID = 'agy-menu-inbox-toggle';
@@ -2098,25 +2097,22 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
   z-index: 20;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  height: 22px;
-  padding: 0 7px;
-  border-radius: 6px;
-  border: 1px solid var(--border, rgba(0, 0, 0, 0.1));
-  background: var(--secondary, rgba(10, 10, 12, 0.04));
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
   color: var(--muted-foreground, #71717a);
-  font-size: 11.5px;
-  font-weight: 500;
-  line-height: 1;
   cursor: pointer;
   flex-shrink: 0;
-  white-space: nowrap;
-  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+  transition: background-color 120ms ease, color 120ms ease;
 }
-#${REVEAL_BTN_ID}:hover {
-  background: var(--secondary, rgba(10,10,12,0.09));
+#${REVEAL_BTN_ID}:hover,
+#${REVEAL_BTN_ID}:focus-visible {
+  background: var(--secondary, rgba(10,10,12,0.06));
   color: var(--foreground, #18181b);
-  border-color: var(--border, rgba(0, 0, 0, 0.18));
 }
 @keyframes agyRevealPulse {
   0% {
@@ -3736,6 +3732,35 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     return { ok: false, reason: 'not-found-native' };
   }
 
+  const REVEAL_BTN_CLASS = 'agy-button agy-button-icon-lg inline-flex items-center justify-center font-medium transition-colors select-none outline-none cursor-pointer h-7 w-7 shrink-0 rounded-lg group bg-transparent text-secondary-foreground hover:text-foreground hover:bg-secondary focus-visible:text-foreground focus-visible:bg-secondary';
+
+  function svgStrokeLocateIcon(size = 16) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.75');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('class', 'pointer-events-none outline-none');
+    const appendShape = (tag, attrs) => {
+      const node = document.createElementNS(ns, tag);
+      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+      svg.appendChild(node);
+    };
+    appendShape('line', { x1: '2', x2: '5', y1: '12', y2: '12' });
+    appendShape('line', { x1: '19', x2: '22', y1: '12', y2: '12' });
+    appendShape('line', { x1: '12', x2: '12', y1: '2', y2: '5' });
+    appendShape('line', { x1: '12', x2: '12', y1: '19', y2: '22' });
+    appendShape('circle', { cx: '12', cy: '12', r: '7' });
+    appendShape('circle', { cx: '12', cy: '12', r: '3' });
+    return svg;
+  }
+
   function syncRevealButton() {
     const activeId = currentChatId();
     const existing = document.getElementById(REVEAL_BTN_ID);
@@ -3746,26 +3771,21 @@ module.exports = function mountProjectSidebarWidget(testEnv) {
     }
     const t = getI18n(state.prefs.language);
     if (existing) {
+      if (existing.className !== REVEAL_BTN_CLASS) existing.className = REVEAL_BTN_CLASS;
       existing.setAttribute('aria-label', t.revealTooltip);
       existing.setAttribute('title', t.revealTooltip);
-      const labelNode = existing.querySelector('[data-agy-reveal-label]');
-      if (labelNode && labelNode.textContent !== t.revealLabel) {
-        labelNode.textContent = t.revealLabel;
-      }
+      existing.querySelector('[data-agy-reveal-label]')?.remove();
       if (existing.parentElement !== host) host.appendChild(existing);
       return;
     }
-    const btn = el('button', '');
+    const btn = el('button', REVEAL_BTN_CLASS);
     btn.id = REVEAL_BTN_ID;
     btn.type = 'button';
     btn.style.webkitAppRegion = 'no-drag';
     btn.setAttribute('data-testid', 'agy-reveal-in-sidebar-button');
     btn.setAttribute('aria-label', t.revealTooltip);
     btn.setAttribute('title', t.revealTooltip);
-    btn.appendChild(svgDomIcon(ICON_PATHS.my_location, 13));
-    const labelSpan = el('span', '', t.revealLabel);
-    labelSpan.setAttribute('data-agy-reveal-label', 'true');
-    btn.appendChild(labelSpan);
+    btn.appendChild(svgStrokeLocateIcon(16));
     for (const evName of ['pointerdown', 'mousedown']) {
       btn.addEventListener(evName, ev => ev.stopPropagation());
     }
