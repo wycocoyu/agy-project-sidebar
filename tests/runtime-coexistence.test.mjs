@@ -506,10 +506,15 @@ test('resolveRevealPlan expands collapsed ancestors, Snoozed, Plan A read-idle f
   assert.equal(missing.found, false);
   assert.equal(missing.reason, 'not-in-list');
 
-  // 6) Regression guard: titlebar reveal button MUST opt out of Electron window-drag region
+  // 6) Regression guard: titlebar reveal button MUST opt out of Electron window-drag region and match native 28x28 icon-only topbar style
   const widgetSrc = readFileSync(new URL('../compat/sidebar-widget.cjs', import.meta.url), 'utf8');
   const cssSlice = widgetSrc.slice(widgetSrc.indexOf('#${REVEAL_BTN_ID} {'));
   assert.match(cssSlice.slice(0, 400), /-webkit-app-region:\s*no-drag/);
+  assert.match(cssSlice.slice(0, 400), /width:\s*28px;\s*height:\s*28px/);
+  assert.match(cssSlice.slice(0, 400), /border:\s*none;/);
+  assert.match(cssSlice.slice(0, 400), /background:\s*transparent;/);
+  assert.equal(widgetSrc.includes('data-agy-reveal-label'), true); // only for cleanup; never created as span
+  assert.equal(widgetSrc.includes("el('span', '', t.revealLabel)"), false);
 });
 
 test('2.35.0 additive mode yields to native single-dim/None, respects subtitleContext heights, preserves prefixItems, and follows Sort & Filter', () => {
@@ -740,18 +745,23 @@ test('per-group Mark all as read collects _agyUnreadIds, invokes native batch up
       ...makeFakeNode('div'),
       __reactFiber$test: listFiber,
     };
+    const topbarHostEl = makeFakeNode('div');
     const fakeDoc = {
       head: makeFakeNode('head'),
       body: { ...makeFakeNode('body'), children: fakeBodyChildren },
       createElement: tag => makeFakeNode(tag),
       createElementNS: (_ns, tag) => makeFakeNode(tag),
       getElementById: () => null,
-      querySelector: sel => (sel === '[data-testid="conversation-list-sidebar"]' ? listDomEl : null),
+      querySelector: sel => {
+        if (sel === '[data-testid="conversation-list-sidebar"]') return listDomEl;
+        if (sel === '.agy-layout-vars') return topbarHostEl;
+        return null;
+      },
       querySelectorAll: () => [],
       dispatchEvent() {},
     };
     const fakeWin = {
-      location: { pathname: '/' },
+      location: { pathname: '/c/r-1' },
       innerWidth: 1200,
       innerHeight: 800,
       addEventListener() {},
@@ -777,6 +787,26 @@ test('per-group Mark all as read collects _agyUnreadIds, invokes native batch up
     widgetMount({ updateConversationAnnotations: ctxObj.updateConversationAnnotations });
     await new Promise(resolve => setTimeout(resolve, 10));
     assert.notEqual(listFiber.type, origListFn);
+
+    // 0) Reveal button uses native 28x28 icon-only topbar classes, no-drag, tooltip, and 16x16 linear stroke SVG
+    const revealBtn = topbarHostEl.children.find(c => c.id === 'agy-reveal-sidebar-btn');
+    assert.ok(revealBtn);
+    assert.match(revealBtn.className, /\bh-7\b/);
+    assert.match(revealBtn.className, /\bw-7\b/);
+    assert.match(revealBtn.className, /\bbg-transparent\b/);
+    assert.equal(revealBtn.style.webkitAppRegion, 'no-drag');
+    assert.equal(revealBtn.attrs['data-testid'], 'agy-reveal-in-sidebar-button');
+    assert.ok(revealBtn.attrs['aria-label'] && revealBtn.attrs.title === revealBtn.attrs['aria-label']);
+    assert.equal(revealBtn.children.length, 1);
+    const revealSvg = revealBtn.children[0];
+    assert.equal(revealSvg.tagName, 'SVG');
+    assert.equal(revealSvg.attrs.viewBox, '0 0 24 24');
+    assert.equal(revealSvg.attrs.width, '16');
+    assert.equal(revealSvg.attrs.height, '16');
+    assert.equal(revealSvg.attrs.fill, 'none');
+    assert.equal(revealSvg.attrs.stroke, 'currentColor');
+    assert.equal(revealSvg.attrs['stroke-width'], '1.75');
+    assert.equal(revealSvg.children.some(n => n.tagName === 'CIRCLE'), true);
 
     // 1) Additive mode active: Status + Requirement renders custom headers with Mark-all-as-read button & preserves native row metadata
     const customOut = listFiber.type(listFiber.memoizedProps);
@@ -813,6 +843,7 @@ test('per-group Mark all as read collects _agyUnreadIds, invokes native batch up
     fakeWin.__agyProjectSidebarDispose?.();
     assert.equal(listFiber.type, origListFn);
   } finally {
+    globalThis.window?.__agyProjectSidebarDispose?.();
     globalThis.window = origWindow;
     globalThis.document = origDocument;
     globalThis.requestAnimationFrame = origRaf;
