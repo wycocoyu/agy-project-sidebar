@@ -305,7 +305,11 @@ export class RuntimeUi {
       let result = {};
       if (req.type === 'tree') {
         const prefs = await this.preferences.get();
-        const tree = await this.snapshot({ force: req.input?.force === true, showArchived: prefs.showArchived });
+        const tree = await this.snapshot({
+          force: req.input?.force === true,
+          showArchived: prefs.showArchived,
+          requirementOverrides: prefs.requirementOverrides,
+        });
         result = { ...tree, preferences: prefs };
       } else if (req.type === 'preferences') {
         const patch = req.input && typeof req.input === 'object' ? req.input : {};

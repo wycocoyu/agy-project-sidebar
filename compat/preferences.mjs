@@ -20,6 +20,7 @@ export const DEFAULT_PREFERENCES = Object.freeze({
   inboxSettled: Object.freeze({}),
   inboxFollowUp: Object.freeze({}),
   inboxSnoozed: Object.freeze({}),
+  requirementOverrides: Object.freeze({}),
 });
 
 function toNonNegInt(value, fallback = 0) {
@@ -61,6 +62,18 @@ function parseSnoozedEntry(val) {
   const setAtMs = toNonNegInt(val.setAtMs, 0);
   if (untilMs <= 0 || setAtMs <= 0) return null;
   return { untilMs, setAtMs, updatedMs: toNonNegInt(val.updatedMs, 0) };
+}
+
+export function parseRequirementOverrideEntry(val) {
+  if (!val || typeof val !== 'object' || Array.isArray(val)) return null;
+  const key = typeof val.key === 'string' ? val.key.replace(/\s+/g, ' ').trim() : '';
+  if (!key || key.length > 160) return null;
+  if (key.toUpperCase() === 'INBOX') {
+    return { key: 'INBOX', label: '' };
+  }
+  const label = typeof val.label === 'string' ? val.label.replace(/\s+/g, ' ').trim().slice(0, 200) : '';
+  if (!label) return null;
+  return { key, label };
 }
 
 export function normalizePreferences(raw = {}, fallback = DEFAULT_PREFERENCES) {
@@ -127,6 +140,9 @@ export function normalizePreferences(raw = {}, fallback = DEFAULT_PREFERENCES) {
   const rawSnoozed = 'inboxSnoozed' in raw ? raw.inboxSnoozed : base.inboxSnoozed;
   const inboxSnoozed = sanitizeIdMap(rawSnoozed, parseSnoozedEntry, v => v.setAtMs, 500);
 
+  const rawOverrides = 'requirementOverrides' in raw ? raw.requirementOverrides : base.requirementOverrides;
+  const requirementOverrides = sanitizeIdMap(rawOverrides, parseRequirementOverrideEntry, () => 0, 2000);
+
   return {
     language,
     groupByDimensions,
@@ -138,6 +154,7 @@ export function normalizePreferences(raw = {}, fallback = DEFAULT_PREFERENCES) {
     inboxSettled,
     inboxFollowUp,
     inboxSnoozed,
+    requirementOverrides,
   };
 }
 
@@ -175,6 +192,32 @@ export class PreferencesStore {
     const run = this.queue.then(async () => {
       const current = await this.get();
       const merged = normalizePreferences({ ...current, ...patch }, current);
+      await atomicWriteJson(this.file, merged);
+      return merged;
+    });
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  async patchRequirementOverrides(updates = {}, { remove = [] } = {}) {
+    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+      throw new Error('Invalid requirementOverrides updates');
+    }
+    const removeSet = new Set(Array.isArray(remove) ? remove.filter(id => typeof id === 'string' && id) : []);
+    const run = this.queue.then(async () => {
+      const current = await this.get();
+      const next = { ...(current.requirementOverrides || {}) };
+      for (const id of removeSet) delete next[id];
+      for (const [id, entry] of Object.entries(updates)) {
+        if (typeof id !== 'string' || !id || id.length > 128) continue;
+        if (entry === null) {
+          delete next[id];
+        } else {
+          const parsed = parseRequirementOverrideEntry(entry);
+          if (parsed) next[id] = parsed;
+        }
+      }
+      const merged = normalizePreferences({ ...current, requirementOverrides: next }, current);
       await atomicWriteJson(this.file, merged);
       return merged;
     });

@@ -42,6 +42,9 @@ module.exports = function createI18n(lang = 'zh-CN') {
       revealPinned: '当前会话位于顶部 Pinned 置顶区',
       revealNotFound: '当前列表未找到该会话（可能已归档）',
       revealNoChat: '请先打开一个会话',
+      markGroupRead: '本组全部标为已读',
+      toastMarkedGroupRead: '已将「{group}」{n} 条会话标为已读',
+      markReadUnavailable: '原生已读接口暂不可用',
     },
     en: {
       labels: {
@@ -85,6 +88,9 @@ module.exports = function createI18n(lang = 'zh-CN') {
       revealPinned: 'Pinned at top of sidebar',
       revealNotFound: 'Not in active sidebar list (check Archived)',
       revealNoChat: 'Open a conversation first',
+      markGroupRead: 'Mark group as read',
+      toastMarkedGroupRead: 'Marked {n} in {group} as read',
+      markReadUnavailable: 'Native mark-as-read context unavailable',
     },
   };
   return dict[lang] || dict['zh-CN'];

@@ -26,6 +26,10 @@ test('renderer source strictly isolates namespaces, removes custom bars, and sup
   assert.equal(src.includes('group-by-submenu-trigger'), true);
   assert.equal(src.includes('data-agy-order'), true);
   assert.equal(src.includes('buildVirtualItemsForDims'), true);
+  assert.equal(src.includes("surface === 'sidebar'"), true);
+  assert.equal(src.includes("subtitleContext?.setting === 'on'"), true);
+  assert.equal(src.includes('agy-group-mark-read'), true);
+  assert.equal(src.includes('updateConversationAnnotations'), true);
 
   assert.equal(validTarget({
     type: 'page',
@@ -41,7 +45,9 @@ test('renderer source strictly isolates namespaces, removes custom bars, and sup
 
   const createI18n = require('../compat/i18n.cjs');
   assert.equal(createI18n('zh-CN').labels.requirement, 'Requirement');
+  assert.equal(createI18n('zh-CN').markGroupRead, '本组全部标为已读');
   assert.equal(createI18n('en').labels.status, 'Status');
+  assert.equal(createI18n('en').markGroupRead, 'Mark group as read');
 });
 
 test('PreferencesStore validates multi-select groupByDimensions and persists atomically', async () => {
@@ -61,6 +67,7 @@ test('PreferencesStore validates multi-select groupByDimensions and persists ato
       inboxSettled: {},
       inboxFollowUp: {},
       inboxSnoozed: {},
+      requirementOverrides: {},
     });
 
     const updated = await store.set({
@@ -503,4 +510,313 @@ test('resolveRevealPlan expands collapsed ancestors, Snoozed, Plan A read-idle f
   const widgetSrc = readFileSync(new URL('../compat/sidebar-widget.cjs', import.meta.url), 'utf8');
   const cssSlice = widgetSrc.slice(widgetSrc.indexOf('#${REVEAL_BTN_ID} {'));
   assert.match(cssSlice.slice(0, 400), /-webkit-app-region:\s*no-drag/);
+});
+
+test('2.35.0 additive mode yields to native single-dim/None, respects subtitleContext heights, preserves prefixItems, and follows Sort & Filter', () => {
+  const widgetMount = require('../compat/sidebar-widget.cjs');
+  const {
+    shouldUseCustomGrouping,
+    estimateItemTopPx,
+    splitPrefixAndMainItems,
+    extractNativeSidebarSettings,
+    matchesNativeFilter,
+    buildVirtualItemsForDims,
+  } = widgetMount({ __unitTestOnly: true });
+
+  // 1) Additive mode gating: yield completely when None or single-dim native Group By (even when inboxEnabled is true)
+  assert.equal(shouldUseCustomGrouping({ prefs: { groupByDimensions: null, inboxEnabled: true }, detectedNativeDim: 'status' }), false);
+  assert.equal(shouldUseCustomGrouping({ prefs: { groupByDimensions: null, inboxEnabled: true }, detectedNativeDim: 'project' }), false);
+  assert.equal(shouldUseCustomGrouping({ prefs: { groupByDimensions: null, inboxEnabled: true }, detectedNativeDim: 'none' }), false);
+  assert.equal(shouldUseCustomGrouping({ prefs: { groupByDimensions: [], inboxEnabled: true }, detectedNativeDim: 'status' }), false);
+  assert.equal(shouldUseCustomGrouping({ prefs: { groupByDimensions: ['status'], inboxEnabled: true }, detectedNativeDim: 'status' }), false);
+  assert.equal(shouldUseCustomGrouping({ prefs: { groupByDimensions: ['requirement'], inboxEnabled: false }, detectedNativeDim: 'status' }), true);
+  assert.equal(shouldUseCustomGrouping({ prefs: { groupByDimensions: ['status', 'requirement'], inboxEnabled: false }, detectedNativeDim: 'status' }), true);
+  assert.equal(shouldUseCustomGrouping({ prefs: { groupByDimensions: ['project', 'status'], inboxEnabled: false }, detectedNativeDim: 'status' }), true);
+
+  // 2) estimateItemTopPx switches row height dynamically between 49px (subtitle on) and 33px (subtitle off)
+  const mixedItems = [
+    { type: 'section-header' }, // 24
+    { type: 'sidebar-agent' },  // 33
+    { type: 'spacer', height: 14 }, // 14
+    { type: 'header' },         // 37
+    { type: 'row' },            // 49 or 33
+    { type: 'show-more' },      // 32
+    { type: 'row' },
+  ];
+  assert.equal(estimateItemTopPx(mixedItems, 6, { subtitleContext: { setting: 'on' } }), 24 + 33 + 14 + 37 + 49 + 32);
+  assert.equal(estimateItemTopPx(mixedItems, 6, { subtitleContext: { setting: 'off' } }), 24 + 33 + 14 + 37 + 33 + 32);
+
+  // 3) splitPrefixAndMainItems preserves Coordinators/Agents, Pinned Conversations, and convgroup:* sections
+  const raw235 = [
+    { type: 'section-header', id: 'section-coordinator', collapseId: 'section-coordinator', title: 'Agents' },
+    { type: 'sidebar-agent', id: 'sidebar-agent:a1', agentId: 'a1', groupId: 'section-coordinator' },
+    { type: 'section-header', id: 'section-pinned', collapseId: 'pinned', title: 'Pinned Conversations' },
+    { type: 'row', id: 'pin-1', cascadeId: 'pin-1', groupId: 'pinned' },
+    { type: 'section-header', id: 'header-convgroup:g1', collapseId: 'convgroup:g1', title: 'Custom Group' },
+    { type: 'row', id: 'cg-1', cascadeId: 'cg-1', groupId: 'convgroup:g1' },
+    { type: 'spacer', height: 16 },
+    { type: 'section-header', id: 'main-section-header', collapseId: 'main-section-header', title: 'Conversations' },
+    { type: 'row', id: 'c-1', cascadeId: 'c-1', groupId: 'status-idle' },
+  ];
+  const split = splitPrefixAndMainItems(raw235, false);
+  assert.equal(split.prefixItems.length, 8);
+  assert.equal(split.mainHdr.id, 'main-section-header');
+  assert.deepEqual(split.postMainItems.map(x => x.id), ['c-1']);
+  assert.equal(splitPrefixAndMainItems(raw235, true).prefixItems.length, 0);
+
+  // 4) Native settings extraction + Filter inheritance
+  const fakeMainHdr = {
+    type: 'section-header',
+    id: 'main-section-header',
+    headerActions: {
+      props: {
+        children: [{
+          props: {
+            groupBy: 'status',
+            sortBy: 'last_user_prompt',
+            filterBy: ['last_7_days', 'env:local'],
+            customFilters: [{ id: 'last_7_days', enabled: true }],
+          },
+        }],
+      },
+    },
+  };
+  const nativeSettings = extractNativeSidebarSettings({ subtitleContext: { setting: 'on', groupBy: 'status' } }, fakeMainHdr);
+  assert.equal(nativeSettings.groupBy, 'status');
+  assert.equal(nativeSettings.sortBy, 'last_user_prompt');
+  assert.deepEqual(nativeSettings.activeFilters, ['last_7_days', 'env:local']);
+
+  const now = 1_800_000_000_000;
+  const day = 86_400_000;
+  assert.equal(matchesNativeFilter({ id: 'a', envKind: 'local', updatedAtMs: now - 2 * day, userInputAtMs: now - 2 * day }, null, nativeSettings.activeFilters, new Set(), now), true);
+  assert.equal(matchesNativeFilter({ id: 'b', envKind: 'cloud', updatedAtMs: now - 2 * day, userInputAtMs: now - 2 * day }, null, nativeSettings.activeFilters, new Set(), now), false);
+  assert.equal(matchesNativeFilter({ id: 'c', envKind: 'local', updatedAtMs: now - 10 * day, userInputAtMs: now - 10 * day }, null, nativeSettings.activeFilters, new Set(), now), false);
+
+  // 5) Sort Conversations: Last Prompt uses userInputAtMs instead of updatedAtMs + optional Inbox disabled + 3-tier requirementOverrides
+  const sortConvs = [
+    { id: 'bg-renamed', title: '1115 | 功能 | MUL-10 background rename', projectKey: 'p1', statusGroup: 'idle', isUnread: false, userInputAtMs: now - 5 * day, updatedAtMs: now - 1000 },
+    { id: 'recent-prompt', title: '1115 | 功能 | MUL-20 fresh prompt', projectKey: 'p1', statusGroup: 'idle', isUnread: false, userInputAtMs: now - 60_000, updatedAtMs: now - 2 * day },
+    { id: 'overridden', title: 'plain chat without tag', projectKey: 'p1', statusGroup: 'idle', isUnread: true, userInputAtMs: now - 30_000, updatedAtMs: now - 30_000 },
+    { id: 'convgrp', title: 'native convgroup item', projectKey: 'p1', groupId: 'convgroup:sprint-1', statusGroup: 'idle', isUnread: false, userInputAtMs: now - 3 * day, updatedAtMs: now - 3 * day },
+  ];
+
+  const byLastPrompt = buildVirtualItemsForDims(sortConvs, ['status', 'requirement'], {
+    sortBy: 'last_user_prompt',
+    inbox: undefined,
+    requirementOverrides: { overridden: { key: 'ISSUE:COC-99', label: 'COC-99 Overridden' } },
+  });
+  assert.equal(byLastPrompt.some(x => x.id === 'header-inbox'), false);
+  assert.ok(byLastPrompt.some(x => x._agyKind === 'req-header' && x.label === 'COC-99 Overridden'));
+  assert.ok(byLastPrompt.some(x => x._agyKind === 'req-header' && x.id.includes('convgroup:sprint-1')));
+  const idxMul20Prompt = byLastPrompt.findIndex(x => x.id === 'header-agy-req:status:idle/req:ISSUE:MUL-20');
+  const idxMul10Prompt = byLastPrompt.findIndex(x => x.id === 'header-agy-req:status:idle/req:ISSUE:MUL-10');
+  assert.ok(idxMul20Prompt > 0 && idxMul10Prompt > idxMul20Prompt);
+
+  const byLastUpdated = buildVirtualItemsForDims(sortConvs, ['status', 'requirement'], {
+    sortBy: 'last_updated',
+    inbox: undefined,
+  });
+  const idxMul20Upd = byLastUpdated.findIndex(x => x.id === 'header-agy-req:status:idle/req:ISSUE:MUL-20');
+  const idxMul10Upd = byLastUpdated.findIndex(x => x.id === 'header-agy-req:status:idle/req:ISSUE:MUL-10');
+  assert.ok(idxMul10Upd > 0 && idxMul20Upd > idxMul10Upd);
+});
+
+test('per-group Mark all as read collects _agyUnreadIds, invokes native batch updateConversationAnnotations with Undo, and patches 2.35.0 surface Fiber cleanly', async () => {
+  const widgetMount = require('../compat/sidebar-widget.cjs');
+  const {
+    buildVirtualItemsForDims,
+    findAnnotationsContext,
+    markGroupConversationsAsRead,
+  } = widgetMount({ __unitTestOnly: true });
+
+  const now = 1_800_000_000_000;
+  const convs = [
+    { id: 'u-1', projectKey: 'p1', projectName: 'Alpha', title: '1115 | 功能 | COC-4 one', statusGroup: 'idle', isUnread: true, updatedAtMs: now - 1000 },
+    { id: 'u-2', projectKey: 'p1', projectName: 'Alpha', title: '1115 | 设计 | COC-4 two', statusGroup: 'idle', isUnread: true, updatedAtMs: now - 2000 },
+    { id: 'r-1', projectKey: 'p1', projectName: 'Alpha', title: '1115 | 调研 | COC-4 three', statusGroup: 'idle', isUnread: false, updatedAtMs: now - 3000 },
+    { id: 'u-3', projectKey: 'p2', projectName: 'Beta', title: '1115 | 功能 | standalone unread', statusGroup: 'idle', isUnread: true, updatedAtMs: now - 4000 },
+  ];
+
+  // Check _agyUnreadIds across Status + Requirement and Project headers
+  const srItems = buildVirtualItemsForDims(convs, ['status', 'requirement'], { inbox: undefined });
+  const idleHdr = srItems.find(x => x.id === 'header-status-idle');
+  const coc4Hdr = srItems.find(x => x._agyKind === 'req-header' && x.id.includes('ISSUE:COC-4'));
+  assert.deepEqual(idleHdr._agyUnreadIds, ['u-1', 'u-2', 'u-3']);
+  assert.deepEqual(coc4Hdr._agyUnreadIds, ['u-1', 'u-2']);
+
+  const projItems = buildVirtualItemsForDims(convs, ['project', 'status'], { inbox: undefined });
+  const alphaHdr = projItems.find(x => x.id === 'header-agy:proj:p1');
+  assert.deepEqual(alphaHdr._agyUnreadIds, ['u-1', 'u-2']);
+
+  // findAnnotationsContext discovers React context dependency or provider value
+  const calls = [];
+  const ctxObj = {
+    updateConversationAnnotations: (ids, patch, merge) => {
+      calls.push({ ids, patch, merge });
+    },
+  };
+  const fiberTree = {
+    return: {
+      dependencies: {
+        firstContext: { memoizedValue: {}, next: { memoizedValue: ctxObj, next: null } },
+      },
+    },
+  };
+  assert.equal(findAnnotationsContext(fiberTree), ctxObj);
+
+  const localViewedMs = new Map([['u-1', 12345]]);
+  const res = markGroupConversationsAsRead(['u-1', 'u-2', 'u-1'], {
+    updateConversationAnnotations: ctxObj.updateConversationAnnotations,
+    localViewedMs,
+    nowMs: 1_800_000_005_123,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.count, 2);
+  assert.equal(localViewedMs.get('u-1'), 1_800_000_005_123);
+  assert.equal(localViewedMs.get('u-2'), 1_800_000_005_123);
+  assert.deepEqual(calls[0], {
+    ids: ['u-1', 'u-2'],
+    patch: { markedAsUnread: false, lastUserViewTime: { seconds: 1_800_000_005, nanos: 123_000_000 } },
+    merge: true,
+  });
+
+  // Undo restores localViewedMs and reverts markedAsUnread: true
+  res.undo();
+  assert.equal(localViewedMs.get('u-1'), 12345);
+  assert.equal(localViewedMs.has('u-2'), false);
+  assert.deepEqual(calls[1], {
+    ids: ['u-1', 'u-2'],
+    patch: { markedAsUnread: true },
+    merge: true,
+  });
+
+  // Live Fiber + DOM mounting smoke test with surface='sidebar' and multi-MR/PR row preservation
+  const origWindow = globalThis.window;
+  const origDocument = globalThis.document;
+  const origRaf = globalThis.requestAnimationFrame;
+  const origSetInterval = globalThis.setInterval;
+  const origClearInterval = globalThis.clearInterval;
+  try {
+    const fakeBodyChildren = [];
+    const makeFakeNode = tag => ({
+      tagName: String(tag).toUpperCase(),
+      style: {},
+      children: [],
+      attrs: {},
+      classList: { add() {}, remove() {} },
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      getAttribute(k) { return this.attrs[k] ?? null; },
+      removeAttribute(k) { delete this.attrs[k]; },
+      appendChild(c) { this.children.push(c); return c; },
+      insertBefore(c) { this.children.unshift(c); return c; },
+      addEventListener() {},
+      removeEventListener() {},
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      closest() { return null; },
+      remove() {},
+    });
+    const renderedCalls = [];
+    const origListFn = props => { renderedCalls.push(props); return { rendered: true, props }; };
+    const listFiber = {
+      type: origListFn,
+      elementType: origListFn,
+      memoizedProps: {
+        surface: 'sidebar',
+        subtitleContext: { setting: 'on', groupBy: 'status' },
+        items: [
+          { type: 'section-header', id: 'section-pinned', collapseId: 'pinned', title: 'Pinned' },
+          { type: 'row', id: 'pin-1', cascadeId: 'pin-1', groupId: 'pinned' },
+          { type: 'section-header', id: 'main-section-header', collapseId: 'main-section-header', title: 'Conversations' },
+          { type: 'row', id: 'u-3', cascadeId: 'u-3', groupId: 'status-idle', pullRequestOverflow: '+2' },
+        ],
+        customHeaderRenderer: () => ({ $$typeof: Symbol.for('react.element'), type: 'div', props: {} }),
+        onFocusGroupId: () => {},
+      },
+      dependencies: { firstContext: { memoizedValue: ctxObj, next: null } },
+      return: null,
+    };
+    const listDomEl = {
+      ...makeFakeNode('div'),
+      __reactFiber$test: listFiber,
+    };
+    const fakeDoc = {
+      head: makeFakeNode('head'),
+      body: { ...makeFakeNode('body'), children: fakeBodyChildren },
+      createElement: tag => makeFakeNode(tag),
+      createElementNS: (_ns, tag) => makeFakeNode(tag),
+      getElementById: () => null,
+      querySelector: sel => (sel === '[data-testid="conversation-list-sidebar"]' ? listDomEl : null),
+      querySelectorAll: () => [],
+      dispatchEvent() {},
+    };
+    const fakeWin = {
+      location: { pathname: '/' },
+      innerWidth: 1200,
+      innerHeight: 800,
+      addEventListener() {},
+      removeEventListener() {},
+      __agyProjectSidebarHost: {
+        getTree: async () => ({
+          projects: [{ id: 'p1', name: 'Alpha' }],
+          conversations: convs,
+          preferences: { groupByDimensions: ['status', 'requirement'], inboxEnabled: false, collapsedGroupKeys: [] },
+        }),
+        setPreferences: async p => p,
+      },
+    };
+    fakeWin.window = fakeWin;
+    fakeWin.top = fakeWin;
+    globalThis.window = fakeWin;
+    globalThis.document = fakeDoc;
+    globalThis.MutationObserver = class { observe() {} disconnect() {} };
+    globalThis.requestAnimationFrame = () => 1;
+    globalThis.setInterval = () => 1;
+    globalThis.clearInterval = () => {};
+
+    widgetMount({ updateConversationAnnotations: ctxObj.updateConversationAnnotations });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.notEqual(listFiber.type, origListFn);
+
+    // 1) Additive mode active: Status + Requirement renders custom headers with Mark-all-as-read button & preserves native row metadata
+    const customOut = listFiber.type(listFiber.memoizedProps);
+    assert.equal(customOut.props.items[0].id, 'section-pinned');
+    assert.equal(customOut.props.items[1].id, 'pin-1');
+    const customRow = customOut.props.items.find(x => x.type === 'row' && x.cascadeId === 'u-3');
+    assert.equal(customRow.pullRequestOverflow, '+2');
+    const customHdr = customOut.props.items.find(x => x.id === 'header-status-idle');
+    const hdrEl = customOut.props.customHeaderRenderer(customHdr);
+    const markBtn = hdrEl.props.children.find(c => c?.props?.['data-testid'] === 'agy-group-mark-read');
+    assert.ok(markBtn);
+    markBtn.props.onClick({ preventDefault() {}, stopPropagation() {} });
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls[2].ids, ['u-1', 'u-2', 'u-3']);
+
+    // 2) History surface ('background') is detected cleanly
+    const histOut = listFiber.type({ ...listFiber.memoizedProps, surface: 'background' });
+    assert.ok(histOut.props.items.every(x => x.id !== 'section-pinned'));
+
+    // 3) Yield to native cleanly when groupByDimensions is null and detectedNativeDim is single-dim
+    fakeWin.__agyProjectSidebarHost.getTree = async () => ({
+      projects: [{ id: 'p1', name: 'Alpha' }],
+      conversations: convs,
+      preferences: { groupByDimensions: null, inboxEnabled: true, collapsedGroupKeys: [] },
+    });
+    const yieldedProps = { ...listFiber.memoizedProps, subtitleContext: { setting: 'on', groupBy: 'status' } };
+    // Reset to native single-dim via dispose + remount with null groupByDimensions
+    fakeWin.__agyProjectSidebarDispose?.();
+    widgetMount({ updateConversationAnnotations: ctxObj.updateConversationAnnotations });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const nativeOut = listFiber.type(yieldedProps);
+    assert.deepEqual(nativeOut.props.items.map(x => x.id), yieldedProps.items.map(x => x.id));
+
+    fakeWin.__agyProjectSidebarDispose?.();
+    assert.equal(listFiber.type, origListFn);
+  } finally {
+    globalThis.window = origWindow;
+    globalThis.document = origDocument;
+    globalThis.requestAnimationFrame = origRaf;
+    globalThis.setInterval = origSetInterval;
+    globalThis.clearInterval = origClearInterval;
+  }
 });
